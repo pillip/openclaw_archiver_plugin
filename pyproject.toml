@@ -1,0 +1,30 @@
+[project]
+name = "openclaw-archiver"
+version = "0.1.0"
+description = "OpenClaw Archiver plugin for Slack — personal message link management via DM"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = []
+
+[project.entry-points."openclaw.plugins"]
+archiver = "openclaw_archiver.plugin:handle_message"
+
+[project.scripts]
+openclaw-archiver-server = "openclaw_archiver.server:run"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4.0",
+    "black>=24.0",
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
