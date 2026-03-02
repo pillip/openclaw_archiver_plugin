@@ -195,3 +195,58 @@ No Critical or High severity issues found. The schema and migration code follows
 ## Verdict
 
 **Approve.** No blocking issues. The DDL matches the data model spec exactly. The migration engine is correct and idempotent for v1. Tests are comprehensive for the current scope. Five non-blocking suggestions are documented, with three follow-up issues proposed for pre-v2 hardening.
+
+---
+
+# Review Notes -- ISSUE-003 DB Connection Manager PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue/ISSUE-003-db-connection`
+**Files changed:** 2 (121 insertions)
+
+---
+
+## Code Review
+
+### Blocking Issues
+
+None.
+
+### Minor Fixes Applied
+
+1. **Unused import `sqlite3` in test_db.py (FIXED)** — Removed unused `import sqlite3` from test file.
+
+### Findings
+
+1. **`db.py` is clean and minimal** — 40 lines, single responsibility. Path resolution priority (`db_path` arg > env var > default) is correct. `os.makedirs(exist_ok=True)` handles the directory creation safely.
+
+2. **PRAGMA execution order is correct** — WAL and FK PRAGMAs are set before `run_migrations()`, which is important because migrations need FK enforcement active.
+
+3. **No connection pooling** — Each call to `get_connection()` creates a new connection. This is appropriate for the CLI plugin use case (request-response per DM).
+
+4. **`tmp_path` type hints use `object`** — Pytest's `tmp_path` fixture returns `pathlib.Path`, but the hint doesn't affect behavior. Non-blocking.
+
+### Follow-ups
+
+- Consider adding `conn.row_factory = sqlite3.Row` in `get_connection()` when cmd_* handlers need dict-like row access.
+
+---
+
+## Security Findings
+
+### Summary
+
+No security issues found.
+
+| # | Severity | Category | Finding | Status |
+|---|----------|----------|---------|--------|
+| S-1 | **Pass** | File permissions | `os.makedirs` uses default umask. On Unix, this creates directories with 0o777 minus umask (typically 0o022 = 0o755). Acceptable for local CLI tool. | Pass |
+| S-2 | **Pass** | Path traversal | DB path comes from env var or explicit arg, both controlled by the user. No user input from Slack reaches this function. | Pass |
+| S-3 | **Pass** | Sensitive data | No secrets. Default path uses `~/.openclaw/` which is standard. | Pass |
+
+---
+
+## Verdict
+
+**Approve with minor fix applied.** Removed unused import. No blocking issues. The connection manager correctly implements WAL, FK, directory creation, env var override, and schema initialization.
