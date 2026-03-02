@@ -250,3 +250,136 @@ No security issues found.
 ## Verdict
 
 **Approve with minor fix applied.** Removed unused import. No blocking issues. The connection manager correctly implements WAL, FK, directory creation, env var override, and schema initialization.
+
+---
+---
+
+# Review Notes -- ISSUE-004 Input Parser PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue/ISSUE-004-input-parser`
+**Files changed:** 2 (parser.py: 55 lines, test_parser.py: 165 lines)
+
+---
+
+## Code Review
+
+### Spec Compliance
+
+**Architecture alignment**: The parsing strategy matches `docs/architecture.md` R-002:
+1. Extract `/p <project>` from end of string -- implemented correctly.
+2. Extract URL via `https?://` regex -- implemented correctly.
+3. Remaining text = title -- implemented correctly.
+4. Parsing order `/p` then URL then title -- matches spec.
+
+**File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/parser.py`
+
+**Acceptance Criteria verification**:
+- `extract_project_option("text /p Backend")` returns `("text", "Backend")` -- covered by `test_basic_project_extraction` (line 10).
+- `extract_project_option("text without project")` returns `("text without project", None)` -- covered by `test_no_project_option` (line 14).
+- `extract_url("..." + URL)` returns `(remaining, URL)` -- covered by `test_basic_url_extraction` (line 54).
+- `parse_save(full_args)` returns `(title, link, project)` -- covered by `test_full_save_with_title_url_project` (line 108).
+- Empty/whitespace inputs return None -- covered by `test_empty_string` and `test_whitespace_only` across all three test classes.
+- Parsing order `/p` then URL then title -- verified by reading `parse_save()` implementation (lines 51-54).
+
+All acceptance criteria are met.
+
+### Blocking Issues
+
+None. All 25 tests pass.
+
+### Suggestions (non-blocking)
+
+1. **Function name diverges from architecture spec**
+
+   The architecture document (`docs/architecture.md`, line 86) specifies `parse_project_option(args)` but the implementation uses `extract_project_option(text)`. While `extract_` is arguably a better name (it describes the operation more precisely), the inconsistency with the spec could cause confusion when implementing `dispatcher.py` (ISSUE-005) which will import this function.
+
+   Additionally, the spec defines `parse_save` as returning `ParsedSave` (a named type), but the implementation returns a bare `tuple[str | None, str | None, str | None]`. A `NamedTuple` or `dataclass` would improve readability at call sites (e.g., `result.title` vs `result[0]`).
+
+   **Recommendation:** Either update `architecture.md` to match the implementation names, or rename the function. If keeping tuples, consider adding a `ParsedSave = NamedTuple(...)` for the `parse_save` return type to match spec and improve usability.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/parser.py` (lines 15, 40)
+
+2. **`extract_url` leaves double spaces when URL is in the middle of text**
+
+   When a URL appears between two words, the concatenation `text[:m.start()] + text[m.end():]` produces a double space. For example, `extract_url("before https://example.com after")` returns `("before  after", ...)`. The test at line 79 explicitly asserts this double-space behavior. While `.strip()` is applied to the outer result, internal double spaces are preserved.
+
+   This is non-blocking because `title` is used for display/storage and double spaces are cosmetically minor. However, if titles are used for search (LIKE matching), double spaces could cause unexpected mismatches.
+
+   **Recommendation:** Replace the concatenation with a regex sub or normalize internal whitespace: `" ".join(remaining.split())`.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/parser.py` (line 35)
+
+3. **Missing test: URL containing `/p` as a path segment**
+
+   The input `"title https://slack.com/p/something /p Backend"` is a plausible real-world case (Slack URLs often have short path segments). While the current regex correctly handles this (the `\s+` before `/p` prevents matching inside URLs), there is no test documenting this behavior. Adding an explicit test would prevent future regressions if the regex is modified.
+
+   **Recommended test:**
+   ```python
+   def test_url_with_p_in_path(self) -> None:
+       title, link, project = parse_save(
+           "title https://slack.com/p/something /p Backend"
+       )
+       assert title == "title"
+       assert link == "https://slack.com/p/something"
+       assert project == "Backend"
+   ```
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_parser.py`
+
+4. **Missing test: `/p` with multiple words after it (not matched)**
+
+   The regex `(\S+)` captures only one non-whitespace token after `/p`. Input like `"title /p Backend Extra"` would NOT match the project pattern (because `\S+` captures `Backend` but then `Extra` is not `\s*$`). This means the entire string is treated as title. This is correct behavior per spec, but no test documents it.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_parser.py`
+
+5. **Missing test: `parse_save` with title only (no URL, no project)**
+
+   There is no test for `parse_save("just a title")`. This is a valid user input scenario and should return `("just a title", None, None)`.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_parser.py`
+
+6. **Code quality is high overall**
+
+   - Zero runtime dependencies, stdlib only -- matches NFR-003.
+   - Compiled regexes at module level (not inside functions) -- good for performance.
+   - Docstrings are clear and explain return semantics.
+   - Type hints are complete and use modern `str | None` syntax with `from __future__ import annotations`.
+   - Functions are pure (no side effects, no state) -- matches architecture spec "순수 함수".
+   - Module is 55 lines total -- well within maintainability bounds.
+
+### Follow-up Issues
+
+- **ISSUE-FOLLOW-006:** Align function naming between `architecture.md` and `parser.py` (either rename `extract_project_option` to `parse_project_option` or update the spec).
+- **ISSUE-FOLLOW-007:** Consider introducing `ParsedSave` NamedTuple for `parse_save` return type to match architecture spec and improve call-site readability.
+- **ISSUE-FOLLOW-008:** Normalize internal whitespace in `extract_url` remaining text (collapse double spaces).
+
+---
+
+## Security Findings
+
+### Summary
+
+No Critical or High severity issues found. The parser module handles untrusted input (Slack message text) safely.
+
+### Detailed Assessment
+
+| # | Severity | Category | Finding | Status |
+|---|----------|----------|---------|--------|
+| S-1 | **Pass** | ReDoS | Both regexes (`_URL_RE` = `https?://\S+`, `_PROJECT_RE` = `\s+/p\s+(\S+)\s*$`) were tested with 100,000-word inputs. Execution time: URL regex <0.1ms, project regex <2ms. No catastrophic backtracking patterns. Both patterns use non-overlapping character classes (`\S+`, `\s+`) with no nested quantifiers. | Pass |
+| S-2 | **Pass** | Injection | Parser output (title, link, project) will be passed to SQL queries in cmd_save (ISSUE-006+). The parser itself does not sanitize or escape -- this is correct because SQL parameterization is the responsibility of the DB layer. No injection risk in the parser module itself. | Pass |
+| S-3 | **Pass** | Input validation | Empty strings and whitespace-only inputs are handled correctly, returning None/empty values. No exceptions are raised on any input type. | Pass |
+| S-4 | **Low** | URL validation | The URL regex `https?://\S+` is intentionally permissive -- it matches anything starting with `http://` or `https://` followed by non-whitespace. This means `https://not-a-real-url!!!` would be accepted. This is acceptable because URL validation is not the parser's responsibility (the URL will be stored as-is for user reference), but downstream consumers should be aware that `link` values are not validated URLs. | Informational |
+| S-5 | **Pass** | Sensitive data | No hardcoded secrets, API keys, or credentials. No file I/O. No network calls. | Pass |
+
+### Notes for Future PRs
+
+- When `cmd_save` is implemented: ensure that `title`, `link`, and `project` values from `parse_save()` are passed to SQL via parameterized queries (`?` placeholders), never via string formatting. The parser intentionally does not sanitize these values.
+- The `link` field should not be rendered as clickable HTML without proper escaping if any web UI is added in the future (XSS prevention). For Slack message responses, Slack handles URL rendering safely.
+
+---
+
+## Verdict
+
+**Approve.** No blocking issues. All 25 tests pass. All acceptance criteria are met. The implementation correctly follows the architecture's parsing strategy (R-002). The code is clean, well-typed, and well-documented at 55 lines. Five non-blocking suggestions are documented, primarily around spec naming alignment, edge-case test coverage, and minor cosmetic whitespace handling. Three follow-up issues proposed.
