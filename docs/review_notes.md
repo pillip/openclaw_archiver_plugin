@@ -85,3 +85,113 @@ No security issues found. This is expected for a scaffolding PR with zero runtim
 ## Verdict
 
 **Approve with fixes applied.** The one blocking issue (missing smoke tests) has been resolved. The scaffolding correctly matches the architecture spec. Two non-blocking suggestions are noted for follow-up.
+
+---
+---
+
+# Review Notes -- ISSUE-002 Schema Migration PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue/ISSUE-002-schema-migration`
+**Files changed:** 3 (215 insertions)
+
+---
+
+## Code Review
+
+### Spec Compliance
+
+**DDL vs data_model.md**: Verified line-by-line. The DDL in `schema_v1.py` matches the spec in `docs/data_model.md` exactly:
+- `projects` table: `id`, `user_id`, `name`, `created_at` with correct types, constraints, and `UNIQUE(user_id, name)`.
+- `archives` table: `id`, `user_id`, `project_id` (nullable FK), `title`, `link`, `created_at` with correct types and constraints.
+- 3 indexes: `idx_archives_user`, `idx_archives_user_project`, `idx_archives_title` with correct column compositions.
+- `PRAGMA user_version = 1` as final statement.
+
+**File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/schema_v1.py`
+
+**Architecture compliance**: `schema_v1` exports `SCHEMA_SQL: str` constant; `migrations` exports `run_migrations(conn)` function with `user_version` tracking. Both match `docs/architecture.md` module specifications.
+
+**File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/migrations.py`
+
+### Blocking Issues
+
+None. All 19 tests pass. Code is correct and matches spec.
+
+### Suggestions (non-blocking)
+
+1. **`executescript` does not provide true transactional atomicity for migrations**
+
+   The docstring on `run_migrations` states "Each migration runs via executescript which handles its own transaction management." However, `executescript` issues an implicit COMMIT of any pending transaction *before* execution, then runs each SQL statement individually. If the script fails mid-way (e.g., after CREATE TABLE but before PRAGMA user_version), the DB is left in a partially-migrated state with no automatic rollback.
+
+   For version 1 this is a **non-issue in practice** because all DDL uses `IF NOT EXISTS`, making reruns safe -- the idempotency test confirms this. However, future migrations using `ALTER TABLE` will not be idempotent, and a partial failure would leave the schema in an inconsistent state that cannot be recovered by rerunning.
+
+   **Recommendation:** When adding migration v2+, wrap each migration in an explicit `BEGIN`/`COMMIT` pair and use `conn.execute()` instead of `conn.executescript()`, or add try/except with rollback logic. Document this limitation in a code comment for now.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/migrations.py` (line 39)
+
+2. **`down` migrations are defined but not callable**
+
+   The `MIGRATIONS` dict includes `"down"` DDL for each version, but there is no `rollback_migration()` or `migrate_down()` function exposed. The `data_model.md` spec describes rollback as a supported strategy. This is acceptable for v1 (manual rollback via DB file restore is the primary strategy per spec), but a follow-up should add the function before v2 ships.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/migrations.py` (lines 12-16)
+
+3. **Missing edge-case tests**
+
+   The test suite is solid for the happy path and core constraints. The following edge cases are not covered:
+
+   - **NOT NULL violation**: Inserting a row with `NULL` for `user_id`, `title`, or `link` should raise `IntegrityError`. Currently only the UNIQUE and FK constraints are tested.
+   - **`created_at` default population**: No test verifies that `created_at` is automatically populated by the `DEFAULT (datetime('now'))` expression when omitted from INSERT.
+   - **Down migration**: The `"down"` DDL in `MIGRATIONS[1]` is never executed in any test. A test should verify that running the down script drops both tables and resets `user_version` to 0.
+   - **Missing migration key**: If `MIGRATIONS` had a gap (e.g., keys 1 and 3 but not 2), `run_migrations` would raise `KeyError`. While not a current problem, a defensive check or test would be good.
+
+   These are non-blocking for this PR but should be addressed before the migration engine is used for v2+.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_schema_migration.py`
+
+4. **Fixture yields but does not need to be a generator**
+
+   The `db` fixture uses `yield conn` followed by `conn.close()`. This is correct and properly handles teardown. No change needed -- just noting it is well-written.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_schema_migration.py` (lines 17-22)
+
+5. **Test imports private function `_get_user_version`**
+
+   Tests import `_get_user_version` (underscore-prefixed, indicating private). This is acceptable for unit testing internal behavior, but if the function is needed externally (e.g., by `db.py` for diagnostics), consider removing the underscore prefix.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_schema_migration.py` (line 10)
+
+### Follow-up Issues
+
+- **ISSUE-FOLLOW-003:** Add `rollback_migration()` function to `migrations.py` before migration v2 is introduced.
+- **ISSUE-FOLLOW-004:** Replace `executescript` with explicit transaction management (`BEGIN`/`COMMIT`/`ROLLBACK`) for non-idempotent future migrations.
+- **ISSUE-FOLLOW-005:** Add edge-case tests for NOT NULL violations, `created_at` default, down migration execution, and missing migration key defense.
+
+---
+
+## Security Findings
+
+### Summary
+
+No Critical or High severity issues found. The schema and migration code follows secure practices.
+
+### Detailed Assessment
+
+| # | Severity | Category | Finding | Status |
+|---|----------|----------|---------|--------|
+| S-1 | **Pass** | SQL Injection | All SQL in `schema_v1.py` is static DDL with no user input interpolation. All SQL in test code uses parameterized queries (`?` placeholders). No string formatting anywhere. | Pass |
+| S-2 | **Pass** | Constraints | All NOT NULL, UNIQUE, and FOREIGN KEY constraints from `data_model.md` are present. `FOREIGN KEY (project_id) REFERENCES projects(id)` is correctly defined. Test fixture enables `PRAGMA foreign_keys = ON` and the FK violation test confirms enforcement. | Pass |
+| S-3 | **Pass** | Sensitive data | No hardcoded secrets, API keys, credentials, or file paths. DB path is not referenced in these modules (will be in `db.py`). | Pass |
+| S-4 | **Low** | Misconfiguration | `executescript` issues an implicit COMMIT, which means `foreign_keys` PRAGMA could theoretically be affected. However, `foreign_keys` is a connection-level setting that persists across `executescript` calls in CPython's sqlite3 module. The FK violation test at line 142-149 confirms this. No action needed. | Pass |
+| S-5 | **Low** | Input validation | `run_migrations` does not validate that `conn` is a valid open connection before operating. A closed or `None` connection would raise an `AttributeError` or `ProgrammingError`. This is acceptable -- the caller (`db.py`, not yet implemented) is responsible for providing a valid connection. | Pass |
+
+### Notes for Future PRs
+
+- When `db.py` is implemented, ensure that `PRAGMA foreign_keys = ON` is set on every new connection *before* calling `run_migrations()`. The migration script itself does not enable foreign keys -- this is by design (connection-level concern), but the integration must be verified.
+- The `down` migration script concatenates multiple statements with semicolons in a single Python string. When a `rollback_migration()` function is added, it should also use `executescript` (not `execute`, which only runs one statement).
+
+---
+
+## Verdict
+
+**Approve.** No blocking issues. The DDL matches the data model spec exactly. The migration engine is correct and idempotent for v1. Tests are comprehensive for the current scope. Five non-blocking suggestions are documented, with three follow-up issues proposed for pre-v2 hardening.
