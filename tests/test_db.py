@@ -1,7 +1,6 @@
 """Tests for db module — connection management."""
 
 import os
-import sqlite3
 
 import pytest
 
