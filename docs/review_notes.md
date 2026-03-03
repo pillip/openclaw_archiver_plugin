@@ -1015,3 +1015,201 @@ No Critical or High severity issues found. All SQL queries use parameterized bin
 ## Verdict
 
 **Approve.** No blocking issues. All 115 tests pass (12 new + 103 existing). All acceptance criteria are met. SQL queries use parameterized binding correctly. `COLLATE NOCASE` provides case-insensitive search as specified. Connection management follows the established `try/finally` pattern. Data isolation between users is enforced and tested. One Low severity security finding (LIKE wildcard characters not escaped) is documented with a follow-up issue. The code closely mirrors `cmd_list.py` in structure, which is both a strength (consistency) and a weakness (duplication) -- a shared formatting helper is proposed as a follow-up. Three follow-up issues proposed.
+
+---
+---
+
+# Review Notes -- ISSUE-009 Edit Command Handler PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue/ISSUE-009-cmd-edit`
+**Files changed:** 3 (cmd_edit.py: 44 lines, db.py: +22 lines, test_cmd_edit.py: 95 lines)
+
+---
+
+## Code Review
+
+### Spec Compliance
+
+**Acceptance Criteria verification:**
+- Title changed and response shows old->new -- covered by `test_edit_success` (line 31) and `test_edit_updates_db` (line 36).
+- Not-found/not-owned returns same error (existence non-disclosure FR-019) -- covered by `test_edit_nonexistent_id` (line 69) and `test_edit_other_user_message` (line 61). Both return the identical `"해당 메세지를 찾을 수 없습니다. (ID: ...)"` message, confirming non-disclosure.
+- Non-numeric ID returns specific error -- covered by `test_edit_non_numeric_id` (line 77).
+- Missing title returns usage -- covered by `test_edit_missing_new_title` (line 81), `test_edit_empty_args` (line 88), `test_edit_id_only_with_spaces` (line 92).
+
+All acceptance criteria are met.
+
+**UX Spec response format:** Verified against spec.
+- Success: `"제목을 수정했습니다. (ID: {id})\n        {old_title} → {new_title}"` -- matches spec with 8-space indentation.
+- Not found: `"해당 메세지를 찾을 수 없습니다. (ID: {id})"` -- matches spec.
+- Non-numeric ID: `"ID는 숫자여야 합니다. 사용법: /archive edit <ID> <새 제목>"` -- matches spec.
+- Missing title: `"사용법: /archive edit <ID> <새 제목>"` -- matches spec.
+
+**SQL query patterns:** Verified against spec.
+- `get_archive_title`: `SELECT title FROM archives WHERE id = ? AND user_id = ?` -- matches spec exactly.
+- `update_archive_title`: `UPDATE archives SET title = ? WHERE id = ? AND user_id = ?` -- matches spec exactly.
+
+### Blocking Issues
+
+1. **TOCTOU: `update_archive_title` return value was ignored (FIXED)**
+
+   The handler called `get_archive_title` (SELECT) to check existence and get the old title, then called `update_archive_title` (UPDATE) but discarded the boolean return value. Between the SELECT and UPDATE, the archive could theoretically be deleted by another connection or process (e.g., a concurrent `/archive delete` request). If the UPDATE affected 0 rows, the handler would still report success with the stale old title.
+
+   While the single-user CLI context makes this extremely unlikely in practice, ignoring the return value of a write operation that explicitly signals success/failure is a correctness bug. The fix is trivial (2 lines) and makes the handler robust against this race.
+
+   **Fix applied:** Added a check on the `updated` return value from `update_archive_title`. If `False`, the handler returns the not-found message.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_edit.py` (lines 36-37)
+
+   Before:
+   ```python
+   update_archive_title(conn, archive_id, user_id, new_title)
+   ```
+
+   After:
+   ```python
+   updated = update_archive_title(conn, archive_id, user_id, new_title)
+   if not updated:
+       return _NOT_FOUND.format(id=archive_id)
+   ```
+
+### Suggestions (non-blocking)
+
+2. **Missing edge-case test: ID=0, negative ID, very large ID**
+
+   The test suite does not cover boundary values for `archive_id`:
+   - `handle("0 새제목", user_id)` -- ID=0 is valid Python int but not a valid SQLite autoincrement ROWID (which starts at 1). The handler would pass `0` to `get_archive_title`, which would return `None`, and the not-found path would be taken. This is correct behavior, but no test documents it.
+   - `handle("-1 새제목", user_id)` -- Negative IDs are valid Python ints but invalid ROWIDs. Same correct behavior, no test.
+   - `handle("99999999999999999999 새제목", user_id)` -- Very large integers. Python handles arbitrary-precision ints, and SQLite accepts them as bind parameters. The SELECT would simply return no rows. Correct behavior, no test.
+
+   **Recommended tests:**
+   ```python
+   def test_edit_zero_id(self, tmp_path, monkeypatch):
+       db_path = _seed_db(tmp_path)
+       monkeypatch.setenv("OPENCLAW_ARCHIVER_DB_PATH", db_path)
+       result = handle("0 새제목", _USER_A)
+       assert "찾을 수 없습니다" in result
+
+   def test_edit_negative_id(self, tmp_path, monkeypatch):
+       db_path = _seed_db(tmp_path)
+       monkeypatch.setenv("OPENCLAW_ARCHIVER_DB_PATH", db_path)
+       result = handle("-1 새제목", _USER_A)
+       assert "찾을 수 없습니다" in result
+   ```
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_edit.py`
+
+3. **Missing test: edit same title (no-op edit)**
+
+   No test verifies what happens when `new_title` equals `old_title`. The handler would still perform the UPDATE and report success with `old_title -> new_title` where both are identical. This is a valid UX question: should no-op edits be rejected or silently succeed? The current behavior (succeed) is reasonable, but a test should document it.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_edit.py`
+
+4. **Missing test: concurrent edit scenario (TOCTOU coverage)**
+
+   The fix applied in blocking issue #1 added a check on `update_archive_title`'s return value, but no test exercises this path. A test that monkeypatches `update_archive_title` to return `False` (simulating a concurrent delete between SELECT and UPDATE) would verify the fix works correctly.
+
+   **Recommended test:**
+   ```python
+   def test_edit_fails_if_deleted_between_check_and_update(self, tmp_path, monkeypatch):
+       db_path = _seed_db(tmp_path)
+       monkeypatch.setenv("OPENCLAW_ARCHIVER_DB_PATH", db_path)
+       monkeypatch.setattr(
+           "openclaw_archiver.cmd_edit.update_archive_title",
+           lambda conn, aid, uid, title: False,
+       )
+       result = handle("1 새제목", _USER_A)
+       assert "찾을 수 없습니다" in result
+   ```
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_edit.py`
+
+5. **`_USAGE` string duplicated between `cmd_edit.py` and `test_cmd_edit.py`**
+
+   The usage string `"사용법: /archive edit <ID> <새 제목>"` is defined in both files. Consistent with the pattern noted in ISSUE-006 and ISSUE-008 reviews. Consider importing from the module or using a looser assertion to prevent drift.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_edit.py` (line 7)
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_edit.py` (line 12)
+
+6. **`_seed_db` pattern is consistent with existing test helpers**
+
+   The `_seed_db` function follows the same pattern as `_make_db` in `test_cmd_save.py` and `_seed_db` in `test_cmd_list.py` / `test_cmd_search.py`. It creates a fresh DB, seeds test data, and returns the path. This is correct and consistent.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_edit.py` (lines 15-21)
+
+7. **`tmp_path` type hint uses `object` instead of `pathlib.Path`**
+
+   Consistent with all previous test files. Non-blocking.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_edit.py` (multiple methods)
+
+8. **Connection management follows established `try/finally` pattern**
+
+   `cmd_edit.handle()` uses `try/finally` to ensure `conn.close()` is always called. The connection is opened after input validation (parsing, int conversion, title presence check), so error paths do not create unnecessary connections. This is efficient and correct, matching `cmd_save`, `cmd_list`, and `cmd_search`.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_edit.py` (lines 30, 42-43)
+
+9. **`get_archive_title` and `update_archive_title` are well-designed DB functions**
+
+   Both functions:
+   - Accept `conn` as a parameter (no hidden connection management).
+   - Use `user_id` in the WHERE clause for authorization.
+   - Use parameterized queries exclusively.
+   - Have clear return types (`str | None` and `bool`).
+   - Are minimal and single-purpose.
+
+   `update_archive_title` correctly calls `conn.commit()` after the UPDATE, consistent with `insert_archive` in the same file. The `cur.rowcount > 0` return value accurately reflects whether a row was modified.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (lines 136-156)
+
+10. **Input parsing is robust**
+
+    The `args.strip().split(None, 1)` pattern correctly handles:
+    - Leading/trailing whitespace: stripped by `.strip()`.
+    - Multiple spaces between ID and title: collapsed by `split(None, 1)`.
+    - Titles containing spaces: preserved by the `maxsplit=1` parameter.
+    - Empty args: `"".strip().split(None, 1)` returns `[]`, length < 1, returns usage.
+    - ID-only with trailing spaces: `"1   ".strip().split(None, 1)` returns `["1"]`, length < 2, returns usage.
+
+    The `parts[1].strip()` check at line 25 handles the edge case where `parts[1]` is whitespace-only (though `split(None, 1)` already strips leading whitespace from the second element, trailing whitespace could remain).
+
+    **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_edit.py` (lines 14-28)
+
+### Follow-up Issues
+
+- **ISSUE-FOLLOW-021:** Add boundary-value tests for edit command: ID=0, negative ID, very large ID.
+- **ISSUE-FOLLOW-022:** Add TOCTOU coverage test that monkeypatches `update_archive_title` to return `False`.
+- **ISSUE-FOLLOW-023:** Consider a no-op edit policy (reject when new_title == old_title, or silently succeed) and add a test documenting the chosen behavior.
+
+---
+
+## Security Findings
+
+### Summary
+
+No Critical or High severity issues found. One Medium-Low finding (TOCTOU) was identified and fixed. All SQL queries use parameterized binding. Authorization is correctly enforced with `user_id` in both SELECT and UPDATE. Existence non-disclosure (FR-019) is correctly implemented.
+
+### Detailed Assessment
+
+| # | Severity | Category | Finding | Status |
+|---|----------|----------|---------|--------|
+| S-1 | **Pass** | SQL Injection | Both `get_archive_title` and `update_archive_title` use `?` parameterized placeholders for all user-supplied values (`archive_id`, `user_id`, `new_title`). No string formatting or concatenation is used in SQL construction. Verified in `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` lines 136-156. | Pass |
+| S-2 | **Pass** | Authorization | Both the SELECT (`get_archive_title`) and UPDATE (`update_archive_title`) include `AND user_id = ?` in their WHERE clauses. This means a user cannot read or modify another user's archive title, even if they know the archive ID. Test `test_edit_other_user_message` (line 61) verifies that User A cannot edit User B's archive (ID=2). | Pass |
+| S-3 | **Pass** | Information disclosure (FR-019) | The not-found and not-owned error messages are identical: `"해당 메세지를 찾을 수 없습니다. (ID: {id})"`. An attacker cannot determine whether an archive ID exists by observing the error message. Tests `test_edit_nonexistent_id` and `test_edit_other_user_message` both assert the exact same error string, confirming non-disclosure. | Pass |
+| S-4 | **Medium** | TOCTOU race condition **(FIXED)** | The original code called `get_archive_title` (SELECT) then `update_archive_title` (UPDATE) without checking the UPDATE result. Between the two calls, the archive could be deleted by a concurrent operation, causing the handler to report a successful edit when no row was actually updated. **Fix:** The handler now checks `update_archive_title`'s boolean return value and returns the not-found error if `False`. The severity is Medium rather than High because: (a) the current architecture is single-process/single-connection per request, making concurrent deletes unlikely, and (b) the worst case is a misleading success message, not data corruption or unauthorized access. | Fixed |
+| S-5 | **Pass** | Connection management | `try/finally` pattern ensures connection is always closed, even on exception. Connection is only opened after input validation. No connection leak possible. | Pass |
+| S-6 | **Pass** | Input validation | `int(raw_id)` safely converts the ID string, raising `ValueError` for non-numeric input (caught and handled). Empty/missing title is checked before any DB operation. `new_title` is stripped of leading/trailing whitespace. No path for empty or None values to reach the DB layer. | Pass |
+| S-7 | **Pass** | XSS | All output is plain text returned to Slack. User-supplied `new_title` and the DB-sourced `old_title` are included via f-strings in plain text context. Slack handles rendering safely. No HTML generation. | Pass |
+| S-8 | **Pass** | Sensitive data | No hardcoded secrets, API keys, credentials, or file paths in any of the three files reviewed. | Pass |
+
+### Notes for Future PRs
+
+- The TOCTOU pattern (SELECT then UPDATE) is inherent in the "show old->new" UX requirement. An alternative approach using `UPDATE ... RETURNING` (SQLite 3.35+) would atomically update and return the old value in a single statement, eliminating the race entirely. However, this requires SQLite 3.35+ and Python 3.11's `sqlite3` module supports it. This would be a cleaner solution if the UX requirement persists in future commands.
+- When implementing `cmd_delete`, the same TOCTOU consideration applies: check-then-delete should verify the DELETE's `rowcount` rather than relying solely on a preceding SELECT.
+
+---
+
+## Verdict
+
+**Approve with fix applied.** One blocking issue (TOCTOU -- ignoring `update_archive_title` return value) has been resolved. All 124 tests pass (9 new + 115 existing). All acceptance criteria are met. SQL safety is confirmed -- every query uses parameterized binding. Authorization is enforced with `user_id` in both SELECT and UPDATE queries. Existence non-disclosure (FR-019) is correctly implemented. Connection management follows the established `try/finally` pattern. The code is clean, minimal (44 lines for the handler, 22 new lines in db.py), and follows existing project patterns. Three follow-up issues proposed for edge-case test coverage.

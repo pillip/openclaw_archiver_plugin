@@ -33,7 +33,9 @@ def handle(args: str, user_id: str) -> str:
         if old_title is None:
             return _NOT_FOUND.format(id=archive_id)
 
-        update_archive_title(conn, archive_id, user_id, new_title)
+        updated = update_archive_title(conn, archive_id, user_id, new_title)
+        if not updated:
+            return _NOT_FOUND.format(id=archive_id)
 
         return (
             f"제목을 수정했습니다. (ID: {archive_id})\n"
