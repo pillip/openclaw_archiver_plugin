@@ -510,3 +510,156 @@ One Medium severity issue found and fixed (prefix matching bypass). No Critical 
 ## Verdict
 
 **Approve with fix applied.** One blocking issue (prefix matching bypass) has been resolved. All 80 tests pass (79 existing + 1 new). All acceptance criteria are met. The dispatcher design is clean, extensible, and follows a secure static-dispatch pattern. Seven non-blocking suggestions are documented, with three follow-up issues proposed.
+
+---
+---
+
+# Review Notes -- ISSUE-006 Save Command Handler PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue/ISSUE-006-cmd-save`
+**Files changed:** 3 (cmd_save.py: 36 lines, db.py: +27 lines, test_cmd_save.py: 155 lines)
+
+---
+
+## Code Review
+
+### Spec Compliance
+
+**Acceptance Criteria verification:**
+- Title+link creates archive record, success message with ID/title -- covered by `test_save_title_and_link` (line 25) and `test_save_response_contains_id` (line 109).
+- With project, auto-create if needed, response includes project name -- covered by `test_save_with_project` (line 36), `test_save_creates_project_automatically` (line 48), `test_save_uses_existing_project` (line 63).
+- No project results in `project_id=NULL` -- covered by `test_save_without_project_stores_null` (line 83).
+- Missing title/link returns usage message -- covered by `test_missing_title_and_link` (line 139), `test_missing_link` (line 143), `test_missing_title` (line 148), `test_whitespace_only` (line 152).
+- `user_id` recorded in `archives.user_id` -- covered by `test_save_records_user_id` (line 96).
+- SQL parameterized queries only -- verified by code inspection (see Security Findings).
+
+All acceptance criteria are met.
+
+**UX Spec response format (Section 3.1):** Verified. `cmd_save.py` lines 26-31 produce the exact format with 8-space indentation for title and project lines, joined by newline. Matches spec.
+
+**Data Model query patterns:** Verified. `get_or_create_project` uses `INSERT OR IGNORE INTO projects (user_id, name) VALUES (?, ?)` then `SELECT id FROM projects WHERE user_id = ? AND name = ?`. `insert_archive` uses `INSERT INTO archives (user_id, project_id, title, link) VALUES (?, ?, ?, ?)`. All match the spec patterns exactly.
+
+### Blocking Issues
+
+None. All 12 tests pass.
+
+### Findings
+
+1. **Transaction atomicity is correct by design**
+
+   `get_or_create_project()` performs an `INSERT OR IGNORE` without committing. `insert_archive()` performs an `INSERT` and then calls `conn.commit()`. Because SQLite's Python binding uses `isolation_level = ''` (deferred transactions), the first DML statement auto-begins a transaction. The single `conn.commit()` in `insert_archive` commits both the project creation and archive insertion atomically. If an exception occurs between the two calls, neither write is persisted. This is the correct behavior.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (lines 43-69)
+
+2. **Connection management is correct**
+
+   `cmd_save.handle()` uses `try/finally` to ensure `conn.close()` is always called, even on exception. The connection is opened after input validation, so the error path (missing title/link) does not create a connection at all. This is efficient and correct.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_save.py` (lines 18-35)
+
+3. **`get_or_create_project` has an unguarded `row[0]` access**
+
+   At line 53, `row[0]` is accessed without a `None` check on `row`. In theory, after `INSERT OR IGNORE` the subsequent `SELECT` should always find a row (either newly inserted or previously existing). However, a concurrent `DELETE` between the INSERT and SELECT, or a schema mismatch, could cause `row` to be `None`, resulting in a `TypeError: 'NoneType' object is not subscriptable`.
+
+   This is extremely unlikely in the current single-connection, single-process architecture. The `# type: ignore[index]` comment acknowledges this. Non-blocking, but a defensive `if row is None: raise RuntimeError(...)` would improve debuggability.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (line 53)
+
+4. **`insert_archive` returns `cur.lastrowid` which could theoretically be `None`**
+
+   `cursor.lastrowid` is `None` if no INSERT has been executed or if the table does not have a `ROWID` column. For the `archives` table with an `INTEGER PRIMARY KEY`, `lastrowid` will always be set after a successful INSERT. The `# type: ignore[return-value]` comment acknowledges this. Non-blocking.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (line 69)
+
+### Suggestions (non-blocking)
+
+5. **Missing test: exception during DB operation does not leak connection**
+
+   No test verifies that the `finally: conn.close()` block works correctly when an exception is raised during `get_or_create_project` or `insert_archive`. A test that monkeypatches one of these functions to raise an exception, then verifies the connection is closed (or at least that the handler propagates the exception cleanly), would improve confidence.
+
+   **Recommended test:**
+   ```python
+   def test_save_closes_connection_on_db_error(self, tmp_path, monkeypatch):
+       db_path = _make_db(tmp_path)
+       monkeypatch.setenv("OPENCLAW_ARCHIVER_DB_PATH", db_path)
+
+       def boom(*args, **kwargs):
+           raise RuntimeError("simulated DB failure")
+
+       monkeypatch.setattr("openclaw_archiver.cmd_save.insert_archive", boom)
+
+       with pytest.raises(RuntimeError, match="simulated DB failure"):
+           handle("title https://example.com", _USER)
+   ```
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_save.py`
+
+6. **Missing test: Unicode titles and project names**
+
+   The test suite includes Korean text in titles (good), but does not test emoji, CJK characters beyond Korean, or other multi-byte Unicode in project names. While SQLite handles Unicode natively, a test with `"title https://example.com /p \\ud83d\\ude80Rocket"` would document the behavior.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_save.py`
+
+7. **Missing test: very long title or link**
+
+   No test verifies behavior with extremely long strings (e.g., 10,000-character titles). SQLite has a default maximum string length of 1 billion bytes, so this is unlikely to fail, but a regression test would document the expected behavior and could catch future column constraints.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_save.py`
+
+8. **Test helper `_make_db` opens and closes a connection just to run migrations**
+
+   This is correct -- it ensures the schema is created before the test. However, every call to `handle()` also calls `get_connection()` which calls `run_migrations()` again. Since migrations are idempotent (using `IF NOT EXISTS`), this is safe but does redundant work. Non-blocking.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_save.py` (lines 14-19)
+
+9. **`_USAGE` is duplicated between `cmd_save.py` and `test_cmd_save.py`**
+
+   The usage string `"사용법: /archive save <제목> <링크> [/p <프로젝트>]"` is defined in both files. If the message changes in one file, the test could silently pass or fail depending on which file is updated. Consider importing the constant from `cmd_save` in the test, or using `assert result.startswith("사용법:")` for a looser match.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_save.py` (line 10)
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_save.py` (line 8)
+
+10. **`tmp_path` type hint uses `object` instead of `pathlib.Path`**
+
+    Pytest's `tmp_path` fixture returns `pathlib.Path`. Using `object` as the type hint works but loses IDE support and type safety. This is consistent with the test style in ISSUE-003 (noted in that review as well). Non-blocking.
+
+    **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_save.py` (multiple test methods)
+
+### Follow-up Issues
+
+- **ISSUE-FOLLOW-012:** Add defensive `None` check in `get_or_create_project` for the `row` variable, with a descriptive `RuntimeError` for debuggability.
+- **ISSUE-FOLLOW-013:** Add edge-case tests for exception handling (connection cleanup), Unicode edge cases, and very long inputs.
+- **ISSUE-FOLLOW-014:** Consider importing `_USAGE` from `cmd_save` in tests (or using a shared constant) to avoid string duplication and drift.
+
+---
+
+## Security Findings
+
+### Summary
+
+No Critical or High severity issues found. All SQL queries use parameterized binding. Transaction semantics are correct. Connection cleanup is handled properly.
+
+### Detailed Assessment
+
+| # | Severity | Category | Finding | Status |
+|---|----------|----------|---------|--------|
+| S-1 | **Pass** | SQL Injection | All six SQL statements across `get_or_create_project` and `insert_archive` use `?` parameterized placeholders. No string formatting, f-strings, or concatenation is used to construct SQL. User-supplied `title`, `link`, `project`, and `user_id` values are all bound via parameter tuples. Verified in `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` lines 45-67. | Pass |
+| S-2 | **Pass** | Input validation | Missing title or link returns usage message without creating a DB connection. The `if not title or not link` guard at `cmd_save.py` line 15 prevents empty/None values from reaching the database layer. | Pass |
+| S-3 | **Pass** | Connection management | `try/finally` pattern in `cmd_save.py` lines 19-35 ensures the connection is always closed, even on exception. No connection leak is possible. | Pass |
+| S-4 | **Pass** | Transaction safety | `get_or_create_project` INSERT and `insert_archive` INSERT are committed together by the single `conn.commit()` at `db.py` line 68. If any step fails, neither write is persisted. This provides atomicity for the save-with-project path. | Pass |
+| S-5 | **Low** | Denial of service | No input length limits are enforced on `title`, `link`, or `project` before they are stored in SQLite. An attacker could send extremely long strings (megabytes) via Slack to bloat the database. In practice, Slack message length is limited to ~40,000 characters, which bounds the maximum input size. This is a theoretical concern. | Informational |
+| S-6 | **Pass** | Sensitive data | No hardcoded secrets, API keys, credentials, or file paths in any of the three files. | Pass |
+| S-7 | **Pass** | XSS | The response is a plain text string returned to the Slack API. Slack renders messages safely and does not execute embedded scripts. No HTML is generated. User-supplied `title` and `project` values are included in the response via f-strings, but this is safe for Slack's text rendering context. | Pass |
+
+### Notes for Future PRs
+
+- The `commit()` call is inside `insert_archive`. If future code needs to perform multiple inserts in a single transaction (e.g., batch save), the commit location would need to be refactored. Consider whether `commit()` should be the caller's responsibility rather than buried inside a utility function. This is a design decision, not a bug.
+- When implementing `cmd_delete` or `cmd_edit`, ensure that authorization checks verify the `user_id` matches the archive's owner before modifying records. The current save command only creates records, so ownership checks are not yet needed.
+
+---
+
+## Verdict
+
+**Approve.** No blocking issues. All 12 tests pass. All acceptance criteria are met. SQL safety is confirmed -- every query uses parameterized binding. Transaction atomicity is correct by design. Connection cleanup is properly handled with `try/finally`. The code is clean, minimal (36 lines for the handler, 27 new lines in db.py), and follows existing project patterns. Five non-blocking suggestions are documented, primarily around missing edge-case tests and minor code quality improvements. Three follow-up issues proposed.
