@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from openclaw_archiver.db import delete_archive, get_archive_title, get_connection
+from openclaw_archiver.formatters import parse_archive_id
 
 _USAGE = "사용법: /archive remove <ID>"
 _NOT_FOUND = "해당 메세지를 찾을 수 없습니다. (ID: {id})"
-_BAD_ID = "ID는 숫자여야 합니다. 사용법: /archive remove <ID>"
 
 
 def handle(args: str, user_id: str) -> str:
@@ -16,10 +16,9 @@ def handle(args: str, user_id: str) -> str:
     if not stripped:
         return _USAGE
 
-    try:
-        archive_id = int(stripped)
-    except ValueError:
-        return _BAD_ID
+    archive_id, err = parse_archive_id(stripped, "remove <ID>")
+    if err:
+        return err
 
     conn = get_connection()
     try:
