@@ -103,3 +103,31 @@ def list_archives_by_project(
         "ORDER BY a.created_at DESC",
         (user_id, project_id),
     ).fetchall()
+
+
+def search_archives(
+    conn: sqlite3.Connection, user_id: str, keyword: str
+) -> list[tuple]:
+    """Search archives by title keyword (case-insensitive), newest first."""
+    return conn.execute(
+        "SELECT a.id, a.title, a.link, p.name, a.created_at "
+        "FROM archives a "
+        "LEFT JOIN projects p ON a.project_id = p.id "
+        "WHERE a.user_id = ? AND a.title LIKE ? COLLATE NOCASE "
+        "ORDER BY a.created_at DESC",
+        (user_id, f"%{keyword}%"),
+    ).fetchall()
+
+
+def search_archives_by_project(
+    conn: sqlite3.Connection, user_id: str, project_id: int, keyword: str
+) -> list[tuple]:
+    """Search archives by keyword within a project (case-insensitive)."""
+    return conn.execute(
+        "SELECT a.id, a.title, a.link, a.created_at "
+        "FROM archives a "
+        "WHERE a.user_id = ? AND a.project_id = ? "
+        "AND a.title LIKE ? COLLATE NOCASE "
+        "ORDER BY a.created_at DESC",
+        (user_id, project_id, f"%{keyword}%"),
+    ).fetchall()
