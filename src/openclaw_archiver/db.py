@@ -166,3 +166,21 @@ def delete_archive(
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def list_projects(
+    conn: sqlite3.Connection, user_id: str
+) -> list[tuple[str, int]]:
+    """List projects with archive counts for a user.
+
+    Returns list of (name, archive_count) tuples.
+    """
+    return conn.execute(
+        "SELECT p.name, COUNT(a.id) AS archive_count "
+        "FROM projects p "
+        "LEFT JOIN archives a ON p.id = a.project_id AND a.user_id = ? "
+        "WHERE p.user_id = ? "
+        "GROUP BY p.id, p.name "
+        "ORDER BY p.name",
+        (user_id, user_id),
+    ).fetchall()
