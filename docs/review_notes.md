@@ -1128,3 +1128,150 @@ No Critical or High severity issues found. The handler correctly enforces owners
 ## Verdict
 
 **Approve.** No blocking issues. All 132 tests pass (8 new + 124 existing). All acceptance criteria are met. The handler correctly follows the established `cmd_edit.py` pattern with one improvement: it checks the return value of the mutation function (`delete_archive`) for TOCTOU safety. SQL uses parameterized queries. Authorization is enforced via `user_id` filtering with uniform error messages to prevent enumeration. Connection management is correct with `try/finally`. Seven non-blocking suggestions documented, primarily around missing edge-case tests and minor redundancy. Three follow-up issues proposed.
+
+---
+---
+
+# Review Notes -- ISSUE-011 Project List Command Handler PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue/ISSUE-011-cmd-project-list`
+**Files changed:** 3 (cmd_project_list.py: 31 lines, db.py: +16 lines, test_cmd_project_list.py: 89 lines)
+
+---
+
+## Code Review
+
+### Spec Compliance
+
+**Acceptance Criteria verification:**
+- `/archive project list` returns header with project count -- covered by `test_lists_projects_with_counts` (line 42).
+- Each project shows name and archive count -- covered by `test_lists_projects_with_counts` (lines 43-46).
+- Data isolation: user only sees own projects -- covered by `test_excludes_other_user_projects` (line 55) and `test_user_b_sees_own_projects` (lines 63-65).
+- Empty state returns guidance message with `/archive save` example -- covered by `test_empty_projects` (lines 87-88).
+- Separator in output -- covered by `test_header_contains_separator` (line 73).
+
+All acceptance criteria are met.
+
+**UX Spec response format (Section 3.6):** Verified against spec.
+- Header: `프로젝트 ({count}개)` with no leading indent -- matches spec.
+- Separator: 8-space indent + full-width dashes -- matches spec.
+- Items: 8-space indent + `{name}     {count}건` -- matches spec format.
+- Empty state: message matches spec exactly.
+
+**SQL query pattern:** Verified.
+- `SELECT p.name, COUNT(a.id) AS archive_count FROM projects p LEFT JOIN archives a ON p.id = a.project_id AND a.user_id = ? WHERE p.user_id = ? GROUP BY p.id, p.name ORDER BY p.name` -- correct and well-structured.
+
+### Blocking Issues
+
+None. All 137 tests pass (5 new + 132 existing).
+
+### Findings
+
+1. **SQL LEFT JOIN is correct and well-designed**
+
+   The `list_projects` query uses `LEFT JOIN archives a ON p.id = a.project_id AND a.user_id = ?` with the `a.user_id` filter in the JOIN condition rather than the WHERE clause. This is the correct approach: placing `a.user_id = ?` in the JOIN ensures that only the requesting user's archives are counted, while the LEFT JOIN still returns projects that have zero matching archives (with `COUNT(a.id) = 0`). If `a.user_id = ?` were in the WHERE clause instead, projects with no archives would be filtered out entirely because the LEFT JOIN would produce NULL for `a.user_id`, which would fail the equality check.
+
+   The `WHERE p.user_id = ?` correctly restricts the results to the requesting user's projects only.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-011-cmd-project-list/src/openclaw_archiver/db.py` (lines 178-186)
+
+2. **Connection management follows established pattern**
+
+   `cmd_project_list.handle()` uses `try/finally` to ensure `conn.close()` is always called, consistent with `cmd_save`, `cmd_list`, `cmd_search`, `cmd_edit`, and `cmd_remove`. This is the correct pattern.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-011-cmd-project-list/src/openclaw_archiver/cmd_project_list.py` (lines 17-30)
+
+3. **`args` parameter is correctly ignored**
+
+   The `handle` function accepts `args` for interface consistency with other command handlers but does not use it. This is correct -- `project list` takes no arguments per the spec.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-011-cmd-project-list/src/openclaw_archiver/cmd_project_list.py` (line 15)
+
+4. **`GROUP BY p.id, p.name` is correct and defensive**
+
+   Grouping by both `p.id` (primary key) and `p.name` is technically redundant since `p.id` is unique, but it is defensive and compatible with stricter SQL modes. SQLite does not require it, but including both columns documents the intent clearly.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-011-cmd-project-list/src/openclaw_archiver/db.py` (line 183)
+
+### Suggestions (non-blocking)
+
+5. **Missing test: project with zero archives**
+
+   The test suite seeds the database with projects that all have at least one archive. There is no test verifying that a project with zero archives displays `0건` in the output. While the SQL is correct (the LEFT JOIN + COUNT pattern handles this), an explicit test would document this behavior and prevent regressions.
+
+   The `list_projects` SQL would correctly return `(name, 0)` for a project with no archives, but no test verifies this path through the handler's formatting logic (specifically that `f"{name}     {count}건"` renders `"ProjectName     0건"`).
+
+   **Recommended test:**
+   ```python
+   def test_project_with_zero_archives(self, tmp_path, monkeypatch):
+       db_path = os.path.join(str(tmp_path), "test.sqlite3")
+       conn = get_connection(db_path)
+       get_or_create_project(conn, _USER_A, "EmptyProject")
+       conn.close()
+       monkeypatch.setenv("OPENCLAW_ARCHIVER_DB_PATH", db_path)
+       result = handle("", _USER_A)
+       assert "프로젝트 (1개)" in result
+       assert "EmptyProject" in result
+       assert "0건" in result
+   ```
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-011-cmd-project-list/tests/test_cmd_project_list.py`
+
+6. **Sort order is alphabetical by name -- spec is ambiguous**
+
+   The SQL uses `ORDER BY p.name` (alphabetical ascending). The UX spec example shows `Backend / HR / Frontend` which is NOT alphabetical (Frontend would come before HR). This suggests the spec example was not meant to define sort order. Alphabetical is a reasonable default. However, if the spec intended sorting by archive count descending (most active projects first), the SQL would need `ORDER BY archive_count DESC, p.name`. This is a product decision, not a code bug.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-011-cmd-project-list/src/openclaw_archiver/db.py` (line 184)
+
+7. **`test_excludes_other_user_projects` is a weak test**
+
+   `test_excludes_other_user_projects` (line 48) only asserts `"프로젝트 (2개)"` -- the same assertion as `test_lists_projects_with_counts`. It does not verify the *absence* of User B's data. A stronger assertion would be to check that User B's unique archive title (`"B의 메시지"`) does NOT appear in User A's results. However, since User B also has a "Backend" project, the test would need to verify archive counts rather than project names. The current test provides some coverage through the count, but it is partially redundant.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-011-cmd-project-list/tests/test_cmd_project_list.py` (lines 48-55)
+
+8. **`tmp_path` type hint uses `object` instead of `pathlib.Path`**
+
+   Consistent with all previous test files. Non-blocking.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-011-cmd-project-list/tests/test_cmd_project_list.py` (multiple methods)
+
+9. **`_seed_db` type hint uses `object` for `tmp_path` parameter**
+
+   Same as above. The helper function at line 14 declares `tmp_path: object`. Non-blocking.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-011-cmd-project-list/tests/test_cmd_project_list.py` (line 14)
+
+### Follow-up Issues
+
+- **ISSUE-FOLLOW-024:** Add a test for projects with zero archives to verify the `0건` display path.
+- **ISSUE-FOLLOW-025:** Confirm with product whether project list should be sorted alphabetically (`ORDER BY p.name`) or by activity (`ORDER BY archive_count DESC`).
+- **ISSUE-FOLLOW-026:** Strengthen `test_excludes_other_user_projects` to assert the absence of cross-user data, not just the count.
+
+---
+
+## Security Findings
+
+### Summary
+
+No Critical or High severity issues found. The SQL query uses parameterized binding for both parameters. Data isolation between users is correctly enforced via `WHERE p.user_id = ?` and the JOIN condition `a.user_id = ?`.
+
+### Detailed Assessment
+
+| # | Severity | Category | Finding | Status |
+|---|----------|----------|---------|--------|
+| S-1 | **Pass** | SQL Injection | `list_projects` uses `?` parameterized placeholders for both `user_id` bindings. No string formatting or concatenation in SQL construction. Verified in `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-011-cmd-project-list/src/openclaw_archiver/db.py` lines 178-186. | Pass |
+| S-2 | **Pass** | Authorization | Data isolation is enforced at two levels: (1) `WHERE p.user_id = ?` restricts projects to the requesting user, (2) `a.user_id = ?` in the JOIN condition restricts archive counts to the requesting user's archives. Even if a project_id is shared across users (it is not, due to `UNIQUE(user_id, name)` constraint), the count would only reflect the requesting user's archives. Tests `test_excludes_other_user_projects` and `test_user_b_sees_own_projects` verify isolation. | Pass |
+| S-3 | **Pass** | Connection management | `try/finally` pattern ensures connection is always closed. No connection leak possible. | Pass |
+| S-4 | **Pass** | Information disclosure | The empty-state message reveals the `/archive save` command syntax, which is acceptable user guidance. No internal paths, SQL errors, or stack traces are exposed. | Pass |
+| S-5 | **Pass** | Input validation | The `args` parameter is unused, so there is no user input to validate beyond `user_id`, which is passed through from the dispatcher (not user-controlled Slack message text). No attack surface via `args`. | Pass |
+| S-6 | **Pass** | XSS | All output is plain text returned to Slack. Project names are user-supplied (created via `/archive save ... /p <name>`) and echoed back via f-strings in plain text. Slack handles rendering safely. | Pass |
+| S-7 | **Pass** | Sensitive data | No hardcoded secrets, API keys, credentials, or file paths in any of the three files reviewed. | Pass |
+| S-8 | **Pass** | Dependencies | No new runtime or dev dependencies added. | Pass |
+
+---
+
+## Verdict
+
+**Approve.** No blocking issues. All 137 tests pass (5 new + 132 existing). All acceptance criteria are met. The SQL query is well-designed: the LEFT JOIN with the `user_id` condition in the JOIN clause correctly counts archives per project while preserving projects with zero archives. Parameterized queries prevent SQL injection. Data isolation is enforced and tested. Connection management follows the established `try/finally` pattern. The handler is minimal at 31 lines and follows existing codebase conventions. Five non-blocking suggestions documented, primarily around missing edge-case test coverage (zero-archive projects) and a weak isolation test. Three follow-up issues proposed.
