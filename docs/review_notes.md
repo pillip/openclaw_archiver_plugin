@@ -663,3 +663,165 @@ No Critical or High severity issues found. All SQL queries use parameterized bin
 ## Verdict
 
 **Approve.** No blocking issues. All 12 tests pass. All acceptance criteria are met. SQL safety is confirmed -- every query uses parameterized binding. Transaction atomicity is correct by design. Connection cleanup is properly handled with `try/finally`. The code is clean, minimal (36 lines for the handler, 27 new lines in db.py), and follows existing project patterns. Five non-blocking suggestions are documented, primarily around missing edge-case tests and minor code quality improvements. Three follow-up issues proposed.
+
+---
+---
+
+# Review Notes -- ISSUE-007 List Command Handler PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue/ISSUE-007-cmd-list`
+**Files changed:** 3 (cmd_list.py: 83 lines, db.py: +34 lines, test_cmd_list.py: 146 lines)
+
+---
+
+## Code Review
+
+### Spec Compliance
+
+**Acceptance Criteria verification:**
+- All list with created_at DESC, #id/title/link/project-or-미분류/date -- covered by `test_list_all_returns_user_archives` (line 36), `test_list_all_shows_project_name` (line 55), `test_list_all_shows_unclassified` (line 63), `test_list_all_contains_id_title_link_date` (line 71).
+- Project list with project header, items without project label -- covered by `test_list_by_project` (line 96) and `test_list_by_project_excludes_project_label` (line 107).
+- Empty list returns proper empty message -- covered by `test_list_all_empty` (line 82).
+- Nonexistent project returns error message -- covered by `test_list_nonexistent_project` (line 116).
+- Project exists but no archives returns empty-project message -- covered by `test_list_project_exists_but_empty` (line 124).
+- Data isolation (other users' archives not shown) -- covered by `test_list_all_excludes_other_user` (line 47) and `test_list_by_project_other_user_not_visible` (line 136).
+
+All acceptance criteria are met.
+
+**UX Spec response format:** Verified line-by-line against the UX spec provided in the PR context.
+- All-list header: `저장된 메세지 ({count}건)` -- matches spec.
+- Project-list header: `저장된 메세지 -- {project_name} ({count}건)` -- matches spec.
+- Separator: 8-space indent + `---...---` -- matches spec.
+- Item lines: `#id  title` at 8-space indent, link at 12-space indent, metadata at 12-space indent -- matches spec.
+- All-list metadata: `프로젝트: {name} | {date}` or `미분류 | {date}` -- matches spec.
+- Project-list metadata: `{date}` only (no project label) -- matches spec.
+- Empty states: all three messages match spec exactly.
+
+**SQL query patterns:** Verified against spec.
+- `list_archives`: `LEFT JOIN projects p ON a.project_id = p.id WHERE a.user_id = ? ORDER BY a.created_at DESC` -- matches spec.
+- `find_project`: `SELECT id, name FROM projects WHERE user_id = ? AND name = ?` -- matches spec (returns id for use in the second query).
+- `list_archives_by_project`: `SELECT ... FROM archives a WHERE a.user_id = ? AND a.project_id = ? ORDER BY a.created_at DESC` -- matches spec.
+
+### Blocking Issues
+
+None. All 103 tests pass (11 new + 92 existing).
+
+### Findings
+
+1. **SQL correctness: LEFT JOIN is appropriate and correct**
+
+   The `list_archives` query uses `LEFT JOIN projects p ON a.project_id = p.id`. This is correct because archives can have `project_id = NULL` (unclassified), and a LEFT JOIN ensures those rows are included with `p.name = NULL`. The `WHERE a.user_id = ?` clause correctly scopes results to the requesting user. There is no cross-user data leak: even though the JOIN is on `p.id` without a `p.user_id` filter, this is safe because archives can only be created with project IDs belonging to the same user (enforced by the save flow in `cmd_save.handle` which calls `get_or_create_project` with the same `user_id`).
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (lines 85-92)
+
+2. **SQL parameterization: all queries use `?` placeholders**
+
+   All three new DB functions (`find_project`, `list_archives`, `list_archives_by_project`) use parameterized queries with `?` placeholders. No string formatting or concatenation is used. This is consistent with the existing codebase pattern.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (lines 72-105)
+
+3. **Connection management: try/finally is correct**
+
+   `cmd_list.handle()` uses `try/finally` to ensure `conn.close()` is always called, matching the pattern established in `cmd_save.handle()`. The connection is opened after the `extract_project_option` call, which is efficient because the parser is pure and cannot fail in a way that requires cleanup.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_list.py` (lines 24-30)
+
+4. **`created_at` slicing is defensive**
+
+   The expression `created_at[:10] if created_at else ""` safely handles the (unlikely) case where `created_at` is `None`. Since the schema defines `DEFAULT (datetime('now'))`, this column should always be populated. The guard is appropriate defensive programming.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_list.py` (lines 42, 73)
+
+### Suggestions (non-blocking)
+
+5. **The `" " + args` workaround is a code smell but functionally correct**
+
+   At line 22, `extract_project_option(" " + args if args else args)` prepends a space so the regex `\s+/p\s+(\S+)\s*$` can match when `/p` is at the start of `args`. This is necessary because the dispatcher strips the subcommand and passes only the remaining text (e.g., `/p Backend` instead of ` /p Backend`).
+
+   The workaround is correct and well-commented. However, it reveals a design tension: `extract_project_option` was designed for `parse_save` where `/p` naturally appears after other text. The `\s+` prefix requirement is an implementation detail leaking into the caller.
+
+   **Cleaner alternatives (for follow-up, not this PR):**
+   - Add an optional `allow_start=True` parameter to `extract_project_option` that adjusts the regex to `(?:^|\s+)/p\s+(\S+)\s*$`.
+   - Create a second regex `_PROJECT_RE_START` that uses `^/p\s+(\S+)\s*$` and try it when the primary regex fails.
+   - Modify the primary regex to use `(?:^|\s+)` instead of `\s+`, which would make it work for both `parse_save` and `cmd_list` without the workaround.
+
+   The third option is the simplest and would not break any existing tests (since `parse_save` always passes text where `/p` follows other content or whitespace).
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_list.py` (line 22)
+
+6. **Missing test: ordering verification**
+
+   The AC specifies `created_at DESC` ordering, and the SQL implements it, but no test explicitly verifies that archives appear in newest-first order. The `_seed_db` function inserts archives sequentially (IDs 1, 2, 3), and since `created_at` defaults to `datetime('now')`, all three rows may have the same timestamp (SQLite's `datetime('now')` has 1-second resolution). A test that explicitly verifies ordering would need to either:
+   - Insert archives with explicit `created_at` values, or
+   - Verify that ID ordering is descending (since IDs increment and timestamps are identical within a test, DESC order by `created_at` with identical timestamps may return any order).
+
+   This is a latent test gap. In practice, the SQL is correct, but the test does not prove it.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_list.py`
+
+7. **Missing test: `handle(None, user_id)` -- None args**
+
+   The handler's type signature declares `args: str`, but if `None` is accidentally passed (e.g., from a dispatcher bug), the expression `" " + args if args else args` would evaluate to `" " + args` (since `None` is falsy... wait, `if args` with `None` is falsy, so it would pass `None` to `extract_project_option`). Actually, looking more carefully: `args = None`, `" " + args if args else args` evaluates to `args` (the else branch), so `extract_project_option(None)` would be called, which would fail on `_PROJECT_RE.search(None)` with `TypeError`. This is acceptable because the type contract says `args: str`, and the dispatcher always passes a string (empty string `""` when no args). But a defensive `args = args or ""` at the top would be more robust.
+
+   This is not a blocking issue because the caller contract is well-defined and correct.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_list.py` (line 22)
+
+8. **`_list_all` and `_list_by_project` share duplicated formatting logic**
+
+   Both functions have identical patterns: build header, add separator, loop over rows appending formatted lines, remove trailing empty line. The only differences are the header format, the per-item metadata line, and the tuple shape. A shared `_format_rows` helper could reduce this duplication. Non-blocking for 83 lines of code, but worth considering if more list-like commands are added.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_list.py` (lines 33-82)
+
+9. **`find_project` returns a tuple but only the first element is used**
+
+   `find_project` returns `(id, name)` but `_list_by_project` only uses `project[0]` (the id). Returning `tuple[int, str] | None` is fine for generality, but the extra `name` fetch is wasted in this context. Non-blocking -- the overhead is negligible.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (line 74)
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_list.py` (line 61)
+
+10. **`tmp_path` type hint uses `object` instead of `pathlib.Path`**
+
+    Consistent with previous test files (noted in ISSUE-003 and ISSUE-006 reviews). Non-blocking.
+
+    **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_list.py` (multiple methods)
+
+11. **Test DB seed function creates a new connection per test**
+
+    Each test calls `_seed_db(tmp_path)` which creates a fresh DB file and seeds it. Then `handle()` calls `get_connection()` which opens a second connection to the same file. This is correct (WAL mode supports concurrent readers/writers), but means each test runs migrations twice. Non-blocking since migrations are idempotent and fast.
+
+    **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_list.py` (lines 14-30)
+
+### Follow-up Issues
+
+- **ISSUE-FOLLOW-015:** Refactor `_PROJECT_RE` regex to use `(?:^|\s+)` instead of `\s+` so that `extract_project_option` works when `/p` is at the start of the string, eliminating the `" " + args` workaround in `cmd_list.py`.
+- **ISSUE-FOLLOW-016:** Add an ordering verification test for the list command that uses explicit `created_at` values to confirm DESC sorting.
+- **ISSUE-FOLLOW-017:** Consider extracting shared formatting logic from `_list_all` and `_list_by_project` into a helper if additional list-style commands are added.
+
+---
+
+## Security Findings
+
+### Summary
+
+No Critical or High severity issues found. All SQL queries use parameterized binding. Connection cleanup is handled properly. Data isolation between users is enforced correctly.
+
+### Detailed Assessment
+
+| # | Severity | Category | Finding | Status |
+|---|----------|----------|---------|--------|
+| S-1 | **Pass** | SQL Injection | All three new DB functions (`find_project`, `list_archives`, `list_archives_by_project`) use `?` parameterized placeholders for all user-supplied values (`user_id`, `name`, `project_id`). No string formatting or concatenation. Verified in `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` lines 72-105. | Pass |
+| S-2 | **Pass** | Authorization | Data isolation is correctly enforced. `list_archives` filters by `a.user_id = ?`. `find_project` filters by `user_id = ? AND name = ?`. `list_archives_by_project` filters by `a.user_id = ? AND a.project_id = ?`. The double filter on both `user_id` and `project_id` in `list_archives_by_project` prevents a user from viewing another user's archives even if they guess a valid `project_id`. Tests `test_list_all_excludes_other_user` and `test_list_by_project_other_user_not_visible` verify this. | Pass |
+| S-3 | **Pass** | Connection management | `try/finally` pattern ensures connection is always closed. No connection leak possible. | Pass |
+| S-4 | **Pass** | Information disclosure | Error messages reveal only the project name the user typed (e.g., `"Backend" 프로젝트를 찾을 수 없습니다.`). No internal paths, SQL errors, or stack traces are exposed. The project name is user-supplied input echoed back, which is safe in Slack's text rendering context. | Pass |
+| S-5 | **Low** | Input validation | The `project_name` extracted from user input is passed directly to `find_project` as a SQL parameter. While parameterization prevents injection, there is no length or character validation on `project_name`. A user could pass an extremely long project name string. This is bounded by Slack's message length limit (~40,000 chars) and results in a simple "not found" response, so the impact is negligible. | Informational |
+| S-6 | **Pass** | XSS | All output is plain text returned to Slack. No HTML generation. User-supplied values (`title`, `link`, `project_name`) are included via f-strings in plain text context. Slack handles rendering safely. | Pass |
+| S-7 | **Pass** | Sensitive data | No hardcoded secrets, API keys, credentials, or file paths in any of the three files reviewed. | Pass |
+
+---
+
+## Verdict
+
+**Approve.** No blocking issues. All 103 tests pass (11 new + 92 existing). All acceptance criteria are met. SQL queries are correct (LEFT JOIN for nullable project, parameterized binding, DESC ordering). Connection management follows the established `try/finally` pattern. Data isolation between users is enforced and tested. The `" " + args` workaround is functionally correct and well-commented, with a follow-up issue proposed for a cleaner solution. Six non-blocking suggestions are documented, with three follow-up issues proposed.
