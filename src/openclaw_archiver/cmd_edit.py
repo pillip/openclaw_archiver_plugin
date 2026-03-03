@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from openclaw_archiver.db import get_archive_title, get_connection, update_archive_title
+from openclaw_archiver.formatters import parse_archive_id
 
 _USAGE = "사용법: /archive edit <ID> <새 제목>"
 _NOT_FOUND = "해당 메세지를 찾을 수 없습니다. (ID: {id})"
-_BAD_ID = "ID는 숫자여야 합니다. 사용법: /archive edit <ID> <새 제목>"
 
 
 def handle(args: str, user_id: str) -> str:
@@ -16,11 +16,9 @@ def handle(args: str, user_id: str) -> str:
     if len(parts) < 1 or not parts[0]:
         return _USAGE
 
-    raw_id = parts[0]
-    try:
-        archive_id = int(raw_id)
-    except ValueError:
-        return _BAD_ID
+    archive_id, err = parse_archive_id(parts[0], "edit <ID> <새 제목>")
+    if err:
+        return err
 
     if len(parts) < 2 or not parts[1].strip():
         return _USAGE
