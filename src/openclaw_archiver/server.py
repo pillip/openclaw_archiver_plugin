@@ -15,6 +15,7 @@ from openclaw_archiver.plugin import handle_message
 _DEFAULT_PORT = 8201
 _BIND_HOST = "127.0.0.1"
 _MAX_BODY_BYTES = 1_048_576  # 1 MiB
+_EX_CONFIG = 78  # sysexits.h — configuration error (systemd: don't restart)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -104,11 +105,13 @@ def run() -> None:
     try:
         server = HTTPServer((_BIND_HOST, port), _Handler)
     except OSError as e:
-        print(f"Error: cannot bind to {_BIND_HOST}:{port} — {e}")
-        print("Hint: another process may be using this port. "
-              "Set OPENCLAW_ARCHIVER_PORT to use a different port.")
-        raise SystemExit(1) from None
-    print(f"Archiver server listening on {_BIND_HOST}:{port}")
+        logger.error("Cannot bind to %s:%d — %s", _BIND_HOST, port, e)
+        logger.error(
+            "Hint: another process may be using this port. "
+            "Set OPENCLAW_ARCHIVER_PORT to use a different port."
+        )
+        raise SystemExit(_EX_CONFIG) from None
+    logger.info("Archiver server listening on %s:%d", _BIND_HOST, port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
