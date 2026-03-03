@@ -9,6 +9,7 @@ from http.server import HTTPServer
 
 import pytest
 
+from openclaw_archiver import __version__
 from openclaw_archiver.server import _Handler
 
 
@@ -69,7 +70,7 @@ class TestHealth:
         assert status == 200
         assert data["ok"] is True
         assert data["plugin"] == "archiver"
-        assert data["version"] == "0.1.0"
+        assert data["version"] == __version__
 
 
 class TestMessage:
@@ -140,6 +141,19 @@ class TestMessageErrors:
 
         assert status == 400
         assert data["ok"] is False
+
+    def test_body_too_large(self, server: str, monkeypatch) -> None:
+        import openclaw_archiver.server as srv
+
+        monkeypatch.setattr(srv, "_MAX_BODY_BYTES", 16)
+        status, data = _post_json(f"{server}/message", {
+            "message": "x" * 100,
+            "user_id": "U_TEST",
+        })
+
+        assert status == 413
+        assert data["ok"] is False
+        assert "too large" in data["error"]
 
     def test_invalid_json(self, server: str) -> None:
         body = b"not json"

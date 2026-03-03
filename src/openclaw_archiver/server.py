@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+logger = logging.getLogger(__name__)
 
 from openclaw_archiver import __version__
 from openclaw_archiver.plugin import handle_message
 
 _DEFAULT_PORT = 8201
 _BIND_HOST = "127.0.0.1"
+_MAX_BODY_BYTES = 1_048_576  # 1 MiB
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -35,6 +39,21 @@ class _Handler(BaseHTTPRequestHandler):
     def _handle_message(self) -> None:
         try:
             length = int(self.headers.get("Content-Length", 0))
+        except (ValueError, TypeError):
+            self._send_json(400, {
+                "ok": False,
+                "error": "invalid Content-Length",
+            })
+            return
+
+        if length > _MAX_BODY_BYTES:
+            self._send_json(413, {
+                "ok": False,
+                "error": f"body too large (max {_MAX_BODY_BYTES} bytes)",
+            })
+            return
+
+        try:
             body = self.rfile.read(length)
             data = json.loads(body)
         except (ValueError, json.JSONDecodeError):
@@ -61,6 +80,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "response": response,
             })
         except Exception:
+            logger.exception("handle_message failed")
             self._send_json(500, {
                 "ok": False,
                 "error": "internal server error",
