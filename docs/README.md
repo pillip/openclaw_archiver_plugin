@@ -21,25 +21,44 @@ uv sync
 uv run pytest -q
 ```
 
-## Usage
+## Installation
 
-### Python OpenClaw (직접 통합)
+### 1. Python HTTP 서버 설치
 
 ```bash
-# 플러그인 설치
+# 프로젝트 클론 및 설치
+git clone <repo-url>
+cd openclaw_archiver_plugin
 pip install .
-# OpenClaw가 entry point를 자동 감지하여 /archive 명령을 처리
 ```
 
-### JS/TS OpenClaw (HTTP 브릿지)
+### 2. Python HTTP 서버 실행
 
 ```bash
-# HTTP 서버 실행 (기본 포트: 8201)
-uv run openclaw-archiver-server
+# 직접 실행 (기본 포트: 8201)
+openclaw-archiver-server
 
 # 환경변수로 포트 변경
-OPENCLAW_ARCHIVER_PORT=9000 uv run openclaw-archiver-server
+OPENCLAW_ARCHIVER_PORT=9000 openclaw-archiver-server
 ```
+
+서버가 정상적으로 실행되면 health check로 확인할 수 있습니다:
+
+```bash
+curl http://127.0.0.1:8201/health
+# {"ok": true, "plugin": "archiver", "version": "0.1.0"}
+```
+
+운영 환경에서는 systemd로 관리하는 것을 권장합니다. 아래 [Deployment (systemd)](#deployment-systemd) 섹션을 참고하세요.
+
+### 3. 브릿지 플러그인 설치
+
+```bash
+cd bridge/openclaw-archiver
+openclaw plugins install .
+```
+
+설치 후 OpenClaw 게이트웨이를 재시작하면 `/archive` 명령이 등록됩니다.
 
 ### Commands
 
