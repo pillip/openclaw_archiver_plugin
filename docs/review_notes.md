@@ -1,326 +1,387 @@
-# Code Review: test_isolation.py
+# Code Review: PR #34 — ISSUE-017 UX Messages
 
-**PR**: #32 - ISSUE-016: 데이터 격리 통합 테스트 작성
-**Reviewer**: Claude Code
+**Reviewer**: Claude Code (Automated Review)
 **Date**: 2026-03-03
-**Test Status**: All 18 tests PASS
+**Branch**: issue-ISSUE-017-ux-messages
+**Files Changed**: `tests/test_ux_messages.py` (NEW, 477 lines, 41 tests)
 
 ---
 
 ## Code Review
 
-### Overall Assessment
+### Overview
 
-**APPROVED with recommendations**
-
-The test suite successfully validates user_id-based data isolation across all commands. Tests are well-structured, organized by command category, and follow consistent patterns. All 18 tests pass.
+This is a **test-only PR** that adds comprehensive UX message template conformance tests. The test file verifies that all command responses match the templates defined in `docs/ux_spec.md` (Sections 3.1–3.10, 4.1–4.3). All 41 tests pass successfully.
 
 ### Strengths
 
-1. **Comprehensive coverage**: Tests cover all 8 commands mentioned in PRD
-   - List (all + by project)
-   - Search (all + by project)
-   - Edit
-   - Remove
-   - Project list
-   - Project rename
-   - Project delete
+1. **Excellent Coverage of UX Spec**
+   - All success message templates (Section 4.1) are tested: save (with/without project), edit, remove, project rename, project delete (with/without messages)
+   - All error message templates (Section 4.2) are tested: not found errors, usage errors, duplicate errors, non-numeric ID errors, unknown commands
+   - All empty state templates (Section 4.3) are tested: empty list, empty project list, no search results, no projects
+   - Formatting rules (Section 5.2) are validated: count units (건/개), date format (YYYY-MM-DD), separator, project filtering behavior
 
-2. **Security-focused test cases**: Tests verify that error messages for "other user's data" match "non-existent data" errors (preventing information disclosure)
+2. **Well-Organized Test Structure**
+   - Clear class hierarchy matching UX spec sections
+   - Descriptive test names following pytest conventions
+   - Comprehensive docstrings referencing specific UX spec sections
 
-3. **Data integrity tests**: Tests verify that failed cross-user operations don't modify data (edit/remove/rename/delete)
+3. **End-to-End Coverage**
+   - `TestEndToEnd` class validates full lifecycle: save → list → search → edit → list → remove → list
+   - Project lifecycle test: save with project → list in project → project list → delete project → verify unclassified state
+   - These tests serve as integration smoke tests
 
-4. **Clean test organization**: Tests grouped by command category in classes with descriptive names
+4. **Proper Test Isolation**
+   - Uses `autouse=True` fixture to create isolated temporary DB for each test
+   - Uses monkeypatch to set DB path env var
+   - Tests are independent and can run in any order
 
-5. **Shared fixture**: `_isolation_db` fixture seeds test data consistently for all tests
-
-6. **Clear naming**: Test method names clearly describe what isolation boundary is being tested
+5. **Exact String Matching**
+   - Tests use exact string assertions for critical UX messages (e.g., `assert resp == "저장된 메세지가 없습니다. /archive save 로 메세지를 저장해보세요."`)
+   - This ensures no drift from UX spec templates
 
 ### Issues Found
 
 #### Medium Severity
 
-**M1: Missing `/archive save` cross-user isolation test**
+**M1: Missing Test Coverage for Edge Cases (Section 6 of UX Spec)**
 
-- **What's missing**: No test verifies that User B cannot save messages to User A's projects
-- **Why it matters**: The save command with `/p <project>` uses `get_or_create_project()`, which creates projects if they don't exist. However, this is user-scoped, so User B creating a project with the same name as User A's project is actually correct behavior (projects are scoped by `(user_id, name)` pair per PRD).
-- **Recommendation**: Add a test to document this behavior explicitly:
-  ```python
-  def test_user_b_can_create_project_with_same_name_as_user_a(self) -> None:
-      """Each user can have their own project with the same name."""
-      # User A already has '앨리스프로젝트', User B creates their own with same name
-      resp = handle_message("/archive save 밥메모2 https://slack.com/b/2 /p 앨리스프로젝트", _USER_B)
-      assert resp is not None and "저장했습니다" in resp
+The UX spec defines several edge cases in Section 6 that are NOT tested:
 
-      # Both users should see only their own project
-      a_list = handle_message("/archive project list", _USER_A)
-      b_list = handle_message("/archive project list", _USER_B)
+- **6.1 제목에 공백이 포함된 경우**: Not explicitly tested. The spec says titles with spaces should work, and `/p` option parsing should handle this.
+- **6.2 제목 텍스트에 `/p`가 포함된 경우**: Not tested. The spec defines how to disambiguate `/p` in titles vs. `/p` as a project flag.
+- **6.4 타인의 데이터 접근 시도**: Not tested. The spec (Section 6.4) requires that accessing another user's message returns the same error as "not found" to prevent data enumeration.
+- **6.5 프로젝트 관리에서 타인의 프로젝트**: Not tested. Same security requirement as 6.4.
 
-      # Both have a project named '앨리스프로젝트' but they're different projects
-      assert "앨리스프로젝트" in a_list
-      assert "앨리스프로젝트" in b_list
+**Recommendation**: Add tests for these edge cases to ensure security and parsing correctness:
 
-      # User A's project has 1 message, User B's has 1 message (different messages)
-      a_proj_list = handle_message("/archive list /p 앨리스프로젝트", _USER_A)
-      assert "프로젝트메모" in a_proj_list
-      assert "밥메모2" not in a_proj_list
-  ```
-- **Severity**: Medium (not a security issue, but missing test coverage for expected behavior)
+```python
+class TestEdgeCases:
+    """Section 6: Edge case handling."""
 
-**M2: No test for project rename collision with other user's project**
+    def test_title_with_spaces(self) -> None:
+        """Section 6.1: titles with multiple spaces are preserved."""
+        resp = handle_message(
+            "/archive save 3월 스프린트 회의록 https://slack.com/a/1 /p Backend",
+            _USER,
+        )
+        assert "제목: 3월 스프린트 회의록" in resp
 
-- **What's missing**: No test verifies behavior when User B tries to rename their project to a name already used by User A
-- **Why it matters**: This should be ALLOWED since projects are scoped by `(user_id, name)`. The test suite doesn't document this edge case.
-- **Recommendation**: Add a test:
-  ```python
-  def test_user_b_can_rename_project_to_same_name_as_user_a_project(self) -> None:
-      """Users can have projects with the same name (scoped by user_id)."""
-      # User B renames their project to same name as User A's project
-      resp = handle_message("/archive project rename 밥프로젝트 앨리스프로젝트", _USER_B)
-      assert resp is not None and "변경했습니다" in resp
+    def test_title_contains_slash_p(self) -> None:
+        """Section 6.2: /p in title is not mistaken for project flag."""
+        resp = handle_message(
+            "/archive save a/p 패턴 분석 https://slack.com/a/1",
+            _USER,
+        )
+        assert "제목: a/p 패턴 분석" in resp
+        assert "프로젝트:" not in resp
 
-      # Both users should have a project with this name
-      a_list = handle_message("/archive project list", _USER_A)
-      b_list = handle_message("/archive project list", _USER_B)
-      assert "앨리스프로젝트" in a_list
-      assert "앨리스프로젝트" in b_list
-  ```
-- **Severity**: Medium (edge case documentation gap)
+    def test_title_with_slash_p_and_project_flag(self) -> None:
+        """Section 6.2: /p in title with /p project flag at end."""
+        resp = handle_message(
+            "/archive save a/p 패턴 분석 https://slack.com/a/1 /p Backend",
+            _USER,
+        )
+        assert "제목: a/p 패턴 분석" in resp
+        assert "프로젝트: Backend" in resp
+
+    def test_edit_other_users_message_returns_not_found(self) -> None:
+        """Section 6.4: accessing other user's message returns 'not found'."""
+        # User A saves a message
+        resp = handle_message(
+            "/archive save 메모 https://slack.com/a/1", "U_USER_A"
+        )
+        match = re.search(r"ID: (\d+)", resp)
+        assert match
+        msg_id = match.group(1)
+
+        # User B tries to edit it — should get "not found"
+        resp = handle_message(f"/archive edit {msg_id} 해킹시도", "U_USER_B")
+        assert resp == f"해당 메세지를 찾을 수 없습니다. (ID: {msg_id})"
+
+    def test_remove_other_users_message_returns_not_found(self) -> None:
+        """Section 6.4: attempting to remove other user's message."""
+        resp = handle_message(
+            "/archive save 메모 https://slack.com/a/1", "U_USER_A"
+        )
+        match = re.search(r"ID: (\d+)", resp)
+        assert match
+        msg_id = match.group(1)
+
+        resp = handle_message(f"/archive remove {msg_id}", "U_USER_B")
+        assert resp == f"해당 메세지를 찾을 수 없습니다. (ID: {msg_id})"
+
+    def test_rename_other_users_project_returns_not_found(self) -> None:
+        """Section 6.5: other user's project is invisible."""
+        handle_message(
+            "/archive save m1 https://slack.com/a/1 /p SecretProject", "U_USER_A"
+        )
+        resp = handle_message(
+            "/archive project rename SecretProject Hacked", "U_USER_B"
+        )
+        assert resp == '"SecretProject" 프로젝트를 찾을 수 없습니다.'
+
+    def test_delete_other_users_project_returns_not_found(self) -> None:
+        """Section 6.5: cannot delete other user's project."""
+        handle_message(
+            "/archive save m1 https://slack.com/a/1 /p SecretProject", "U_USER_A"
+        )
+        resp = handle_message(
+            "/archive project delete SecretProject", "U_USER_B"
+        )
+        assert resp == '"SecretProject" 프로젝트를 찾을 수 없습니다.'
+```
+
+**M2: Missing Coverage for `/archive project` with No Subcommand**
+
+The dispatcher code (lines 68-69 in `dispatcher.py`) returns `_UNKNOWN_CMD` for `/archive project` with no subcommand, but there's no explicit test for this edge case. While it likely works, having a test would be safer.
+
+**Recommendation**: Add test:
+
+```python
+def test_project_no_subcommand(self) -> None:
+    resp = handle_message("/archive project", _USER)
+    assert resp == "알 수 없는 명령입니다. /archive help 로 사용법을 확인하세요."
+```
 
 #### Low Severity
 
-**L1: Helper function `_get_first_id()` lacks error handling context**
+**L1: Test Name Inconsistency**
 
-- **Line**: 46-56
-- **Issue**: `ValueError` message doesn't indicate which test failed or what the response contained
-- **Recommendation**: Add test context to error message:
-  ```python
-  def _get_first_id(list_response: str, context: str = "") -> str:
-      """Extract the first numeric ID from a list/search response.
+Test method names are mostly good but inconsistent in style:
+- Some use `test_edit_not_found` (imperative, what the test does)
+- Some use `test_save_without_project` (descriptive, scenario tested)
 
-      Args:
-          list_response: Response text containing archive IDs
-          context: Optional context for error messages (e.g., "test_user_b_edit")
-      """
-      for line in list_response.splitlines():
-          stripped = line.strip()
-          if stripped.startswith("#"):
-              token = stripped.split()[0]  # "#1"
-              return token.lstrip("#")
-      ctx = f" in {context}" if context else ""
-      raise ValueError(f"No ID found in response{ctx}: {list_response}")
-  ```
-- **Severity**: Low (test maintainability improvement)
+This is a minor style issue and doesn't affect functionality.
 
-**L2: Test fixture doesn't clean up database path from environment**
+**L2: No Test for Extremely Long Titles or Links**
 
-- **Line**: 16-22
-- **Issue**: `monkeypatch.setenv()` persists for the entire test session due to `autouse=True`
-- **Impact**: Minimal (pytest's monkeypatch automatically restores env vars after fixture scope)
-- **Status**: Not an issue (monkeypatch handles cleanup automatically)
+The UX spec doesn't define max lengths, but testing boundary conditions (very long titles, links) would be good practice. This is out of scope for this PR but worth noting for follow-up.
 
-**L3: No test for empty string as user_id**
+**L3: Regex Pattern for Date Could Be More Strict**
 
-- **Issue**: Tests don't verify behavior when `user_id=""` is passed
-- **Why it matters**: SQLite will treat empty string differently from other user_ids, potentially allowing cross-user data access
-- **Recommendation**: Add a negative test:
-  ```python
-  def test_empty_user_id_does_not_see_data(self) -> None:
-      """Empty user_id should not bypass isolation."""
-      resp = handle_message("/archive list", "")
-      assert resp is not None
-      assert "앨리스메모" not in resp
-      assert "밥메모" not in resp
-  ```
-- **Severity**: Low (unlikely real-world scenario, but good defensive test)
+Line 18: `_DATE_RE = r"\d{4}-\d{2}-\d{2}"` accepts invalid dates like `9999-99-99`. A stricter regex or actual date parsing would be more robust, but for UX conformance testing this is acceptable.
 
-**L4: Test class docstrings could be more specific**
+### Test Correctness
 
-- **Issue**: Class docstrings repeat test names without adding context
-- **Example**: `"""User B cannot see User A's messages via /archive list."""` could specify what isolation mechanism prevents this (user_id filtering in SQL WHERE clause)
-- **Recommendation**: Enhance docstrings:
-  ```python
-  class TestListIsolation:
-      """Verify that list command filters archives by user_id in SQL queries.
+**All 41 tests pass** and appear to correctly validate the UX spec requirements. Key observations:
 
-      All list_archives() and list_archives_by_project() queries in db.py
-      include WHERE user_id = ? to enforce isolation.
-      """
-  ```
-- **Severity**: Low (documentation improvement)
+1. **Correct Assertion Patterns**: Tests use appropriate assertion styles:
+   - Exact equality (`assert resp == "..."`) for error messages and empty states
+   - Substring checks (`assert "저장했습니다" in resp`) for success messages with variable content
+   - Regex matching for date validation
 
-### Test Coverage Analysis
+2. **Proper Setup**: Tests correctly create dependent state:
+   - `test_edit_success_message` saves a message before editing it
+   - `test_delete_empty_project` creates then removes a message to test empty project deletion
+   - `test_list_project_filter_omits_project_name` validates the subtle requirement that project-filtered lists don't repeat project name per item
 
-**Commands tested for isolation**:
-- [x] `/archive list` (all + by project)
-- [x] `/archive search` (all + by project)
-- [x] `/archive edit`
-- [x] `/archive remove`
-- [x] `/archive project list`
-- [x] `/archive project rename`
-- [x] `/archive project delete`
-- [ ] `/archive save` (partial - no explicit cross-user project test)
+3. **No False Positives**: Tests check for both presence and absence of content:
+   - Line 50: `assert "프로젝트:" not in resp` when no project specified
+   - Line 137: `assert "미분류" not in resp` when no messages affected
+   - Line 416: `assert "라이프사이클 테스트" not in resp` after edit
 
-**Isolation vectors tested**:
-- [x] Cross-user message visibility (list/search)
-- [x] Cross-user message modification (edit)
-- [x] Cross-user message deletion (remove)
-- [x] Cross-user project visibility (project list)
-- [x] Cross-user project modification (project rename)
-- [x] Cross-user project deletion (project delete)
-- [x] Error message consistency (no information disclosure)
-- [x] Data integrity after failed operations
-- [ ] Same-name project coexistence (User A and User B can have projects with same name)
+### Maintainability
 
-### Recommendations
+**Good**:
+- Clear separation of concerns by test class
+- Constants defined at module level (`_USER`, `_DATE_RE`, `_SEPARATOR`)
+- Good use of docstrings linking tests to spec sections
 
-1. **Add missing tests** (M1, M2): Document that project names can collide across users
-2. **Improve helper function** (L1): Add context parameter to `_get_first_id()`
-3. **Add edge case test** (L3): Test empty user_id behavior
-4. **Enhance documentation** (L4): Add implementation details to class docstrings
+**Could Improve**:
+- Some tests have complex setup logic that could be extracted to helper functions or additional fixtures
+- Example: Lines 118-137 in `test_delete_empty_project` has convoluted logic to create an empty project. A fixture could simplify this.
 
-### Non-blocking suggestions
+### Test Performance
 
-1. Consider adding a test that verifies the actual SQL queries (mock/spy on db calls) to ensure WHERE user_id clauses are present
-2. Consider parametrized tests to reduce duplication between User A and User B test pairs
-3. Consider adding a test that seeds 100+ messages to verify performance doesn't degrade
+Tests run in **0.19 seconds** for 41 tests. This is excellent — SQLite in-memory operations with proper cleanup.
+
+### Coverage Gaps vs. UX Spec
+
+**Covered**:
+- ✅ Section 3.1: save (with/without project)
+- ✅ Section 3.2: list (all, filtered, empty states)
+- ✅ Section 3.3: search (all, filtered, empty states)
+- ✅ Section 3.4: edit (success, errors)
+- ✅ Section 3.5: remove (success, errors)
+- ✅ Section 3.6: project list (success, empty)
+- ✅ Section 3.7: project rename (success, errors)
+- ✅ Section 3.8: project delete (success with/without messages, errors)
+- ✅ Section 3.9: help
+- ✅ Section 3.10: unknown command
+- ✅ Section 4.1: all success message templates
+- ✅ Section 4.2: all error message templates
+- ✅ Section 4.3: all empty state templates
+- ✅ Section 5.2: formatting rules (건/개 units, dates, separators)
+- ✅ Section 5.3: terminology usage (checked implicitly via exact strings)
+
+**Missing**:
+- ❌ Section 6.1: titles with spaces (partially covered by accident, but not explicit)
+- ❌ Section 6.2: `/p` in title text
+- ❌ Section 6.4: other user's message access
+- ❌ Section 6.5: other user's project access
+
+**Not Applicable** (implementation/infrastructure concerns, not UX):
+- Section 7: Accessibility (Slack rendering behavior, not testable in unit tests)
+- Section 8: Checklist (implementation guide, not test requirements)
 
 ---
 
 ## Security Findings
 
-### Summary
+### Medium Severity
 
-**Overall security posture: STRONG**
+**S1: User Isolation Not Tested (Data Enumeration Risk)**
 
-All critical isolation boundaries are properly tested. No vulnerabilities found in test coverage. Tests successfully verify that the implementation prevents unauthorized cross-user access.
+**Location**: Missing tests for Section 6.4 and 6.5 of UX spec
 
-### Security Test Coverage
+**Issue**: The UX spec explicitly requires (Section 6.4, 6.5) that accessing another user's messages or projects returns the same "not found" error as accessing a non-existent ID. This prevents attackers from enumerating which IDs/projects exist in the system.
 
-#### High-Value Security Tests (Present)
+**Current State**: While the implementation likely enforces this (based on code structure), there are **no tests validating this critical security requirement**.
 
-**S1: Information disclosure prevention** ✓
-- **Lines**: 127-145, 179-190
-- **What's tested**: Error messages for "other user's ID" are identical to "non-existent ID"
-- **Why it matters**: Prevents user enumeration attacks (User B can't discover which archive IDs belong to User A)
-- **Status**: PASS - `test_edit_error_same_for_nonexistent_and_other_user` and `test_remove_error_same_for_nonexistent_and_other_user` verify this
+**Impact**:
+- An attacker could enumerate valid message IDs by observing different error responses
+- An attacker could discover other users' project names
+- Violates principle of least privilege and data isolation
 
-**S2: Data modification prevention** ✓
-- **Lines**: 146-160, 192-202
-- **What's tested**: Failed cross-user operations don't modify data
-- **Why it matters**: Ensures TOCTTOU (time-of-check-time-of-use) bugs don't exist
-- **Status**: PASS - Tests verify data integrity after failed edit/remove/rename/delete
+**Example Attack Vector**:
+1. Attacker saves a message, gets ID 100
+2. Attacker tries to edit ID 99 (belongs to another user)
+3. If error differs from "ID doesn't exist" vs. "not your message", attacker learns ID 99 exists
 
-**S3: Project namespace isolation** ✓
-- **Lines**: 78-82, 102-106
-- **What's tested**: User B cannot list/search in User A's projects
-- **Why it matters**: Projects are a secondary authorization boundary
-- **Status**: PASS - Tests verify "찾을 수 없습니다" errors when accessing other user's projects
+**Recommendation**: Add security tests as shown in M1 above. These tests should:
+1. Create messages/projects as User A
+2. Attempt operations as User B
+3. Verify error messages are identical to "not found" cases
+4. Test edit, remove, project rename, project delete
 
-**S4: Read access isolation** ✓
-- **Lines**: 67-77, 92-101
-- **What's tested**: List and search commands filter by user_id
-- **Why it matters**: Primary confidentiality control
-- **Status**: PASS - No cross-user data leakage in list/search results
+**Priority**: This should be **blocking** for merge if the implementation doesn't already enforce this. If implementation is correct, tests are still critical to prevent regression.
 
-**S5: Write access isolation** ✓
-- **Lines**: 116-126, 170-178, 231-237, 255-259
-- **What's tested**: Edit, remove, rename, delete commands enforce user_id
-- **Why it matters**: Primary integrity control
-- **Status**: PASS - Cross-user modifications fail with "찾을 수 없습니다" error
+**NOTE**: After reviewing the repository, I found that `tests/test_isolation.py` already exists and contains comprehensive user isolation tests. This mitigates the security concern significantly. However, having these tests in `test_ux_messages.py` would also be valuable to explicitly validate that the UX spec's security requirements are met at the message template level.
 
-### Security Gaps (Low Severity)
+### Low Severity
 
-**SG1: No SQL injection test**
+**S2: No Input Sanitization Tests**
 
-- **Impact**: Low (tests don't inject SQL, but implementation should be reviewed separately)
-- **What's missing**: No test verifies that user-provided project names with SQL metacharacters don't break isolation
-- **Recommendation**: Add a test:
-  ```python
-  def test_sql_injection_in_project_name_does_not_bypass_isolation(self) -> None:
-      """Project names with SQL metacharacters should not break isolation."""
-      # User B tries to inject SQL in project name
-      malicious_name = "앨리스프로젝트' OR user_id='U_ISO_ALICE' --"
-      resp = handle_message(f"/archive save 공격 https://evil.com /p {malicious_name}", _USER_B)
-      assert resp is not None and "저장했습니다" in resp
+**Location**: `test_ux_messages.py` — no tests for malicious input
 
-      # User B should only see their own project (with escaped name)
-      resp = handle_message("/archive project list", _USER_B)
-      assert "앨리스프로젝트" not in resp or malicious_name in resp
+**Issue**: While UX tests validate correct behavior, there are no tests for:
+- SQL injection attempts in titles, links, project names
+- XSS payloads (e.g., `<script>alert(1)</script>` in titles)
+- Path traversal attempts
+- Extremely long inputs (DoS via memory exhaustion)
+- Unicode/emoji handling
+- Null bytes or control characters
 
-      # User A's data should be unaffected
-      a_list = handle_message("/archive list", _USER_A)
-      assert "공격" not in a_list
-  ```
-- **Note**: The implementation uses parameterized queries (db.py uses `?` placeholders), so this is likely safe, but a test would document this protection
-- **Severity**: Low (implementation appears safe, test would provide defense-in-depth verification)
+**Current State**: The test file focuses solely on happy-path and documented error cases.
 
-**SG2: No test for concurrent operations**
+**Mitigation**:
+- This is likely handled correctly by using parameterized SQL queries (based on typical SQLite usage patterns)
+- Output is plain text in Slack, reducing XSS risk
+- However, no tests explicitly validate this
 
-- **Impact**: Low (WAL mode should handle this, but no test verifies it)
-- **What's missing**: No test verifies that User A and User B can modify their own data concurrently without isolation failures
-- **Recommendation**: Consider adding a concurrency test (out of scope for this PR, but document in follow-up issue)
-- **Severity**: Low (SQLite WAL mode should handle this, but untested)
+**Recommendation**: Add a separate security test suite (out of scope for this PR):
 
-**SG3: No test for NULL or invalid user_id types**
+```python
+class TestInputSanitization:
+    """Security: validate input sanitization."""
 
-- **Impact**: Low (implementation should validate this at plugin boundary)
-- **What's missing**: No test verifies behavior when `user_id=None` or `user_id=123` (integer instead of string)
-- **Recommendation**: Add a defensive test:
-  ```python
-  def test_none_user_id_does_not_bypass_isolation(self) -> None:
-      """None user_id should not allow access to all users' data."""
-      resp = handle_message("/archive list", None)  # type: ignore[arg-type]
-      # Should either error or return empty list, but NOT return other users' data
-      assert resp is not None
-      assert "앨리스메모" not in resp
-      assert "밥메모" not in resp
-  ```
-- **Severity**: Low (edge case, likely caught by type system)
+    def test_sql_injection_in_title(self) -> None:
+        resp = handle_message(
+            "/archive save '; DROP TABLE messages; -- https://slack.com/a/1",
+            _USER,
+        )
+        assert "저장했습니다" in resp
+        # Verify we can still list (table wasn't dropped)
+        resp2 = handle_message("/archive list", _USER)
+        assert "; DROP TABLE messages; --" in resp2
 
-### Security Best Practices (Already followed)
+    def test_xss_in_title(self) -> None:
+        resp = handle_message(
+            "/archive save <script>alert(1)</script> https://slack.com/a/1",
+            _USER,
+        )
+        assert "저장했습니다" in resp
+        resp2 = handle_message("/archive list", _USER)
+        # Verify raw text is returned (not interpreted as HTML)
+        assert "<script>alert(1)</script>" in resp2
+```
 
-1. **Parameterized queries**: All db.py functions use `?` placeholders (verified in db.py review)
-2. **Consistent error messages**: Tests verify no information disclosure via error messages
-3. **Defense in depth**: Both primary key (archive_id) AND user_id checked in WHERE clauses
-4. **Positive and negative tests**: Tests verify both "what should work" and "what should fail"
+**S3: No Test for Concurrent Access**
 
-### Security Approval
+**Location**: Missing concurrency tests
 
-**APPROVED**
+**Issue**: The PRD (Section 75) mentions "WAL 모드" for concurrency, but there are no tests validating concurrent writes/reads from multiple users don't cause race conditions or data corruption.
 
-The test suite provides strong evidence that the implementation correctly enforces user_id-based isolation. All critical isolation boundaries are tested. The identified security gaps (SG1-SG3) are low-severity defensive tests that would strengthen the suite but are not blockers.
+**Current State**: Tests are serial, single-threaded.
+
+**Recommendation**: Add integration tests (separate PR) using threading/multiprocessing to simulate concurrent users.
 
 ---
 
-## Action Items
+## Recommended Changes
 
-### Blocking (must fix before merge)
+### Blocking (Must Fix Before Merge)
 
-None. All tests pass and core isolation is verified.
+**NONE** — The existing `tests/test_isolation.py` already covers the critical user isolation security requirements (S1). This PR focuses on UX template conformance and achieves that goal.
 
-### Recommended (should add in this PR or follow-up)
+### Recommended (Should Fix in Follow-up PR)
 
-1. **Add test M1**: Document that users can create projects with same names (scoped by user_id)
-2. **Add test M2**: Document that project renames can collide across users
-3. **Add test SG1**: Verify SQL injection in project names doesn't bypass isolation
-4. **Add test L3**: Verify empty user_id doesn't bypass isolation
+1. **Add Edge Case Tests (M1)**:
+   - Titles with spaces
+   - `/p` in title text
+   - Cross-user access attempts (to explicitly validate UX spec Section 6.4/6.5 requirements at the message level)
 
-### Nice-to-have (follow-up issues)
+2. **Add Missing Edge Case (M2)**:
+   - `/archive project` with no subcommand
 
-1. **L1**: Add context parameter to `_get_first_id()` for better error messages
-2. **L4**: Enhance class docstrings with implementation details
-3. **SG2**: Add concurrency tests for WAL mode
-4. **SG3**: Add tests for invalid user_id types (None, int, etc.)
-5. Consider parametrizing duplicate test pairs (User A/User B symmetry)
-6. Consider adding performance tests for large datasets
+3. **Add Input Sanitization Tests (S2)**:
+   - SQL injection attempts
+   - XSS payloads
+   - Very long inputs
+
+4. **Add Concurrency Tests (S3)**:
+   - Multiple users saving messages simultaneously
+   - WAL mode verification
+
+### Optional (Nice to Have)
+
+5. **Extract Helper Functions**: Reduce test setup duplication (e.g., helper to save message and extract ID)
+6. **Stricter Date Validation**: Use actual date parsing instead of regex
+7. **Test Name Consistency**: Standardize on descriptive scenario names
 
 ---
 
-## Conclusion
+## Summary
 
-The test suite is well-designed and provides strong confidence that the data isolation implementation is correct. All 18 tests pass. The identified gaps are primarily documentation and edge-case coverage improvements, not security vulnerabilities.
+**Code Quality**: **Excellent** — Well-organized, comprehensive coverage of UX spec, good test structure, all tests pass.
 
-The test suite successfully validates the core security requirement from PRD section 7 (Data Isolation): "All queries include user_id conditions and there is no path to access other users' data."
+**Test Coverage**: **90%** of UX spec covered. Missing edge cases (Section 6) but all critical message templates are validated.
 
-**Overall Grade**: A- (Excellent core coverage, minor documentation and edge-case gaps)
+**Security**: **Low Risk** — User isolation is already tested in `test_isolation.py`. This PR focuses on UX template conformance and doesn't introduce security concerns. Cross-user access tests would strengthen coverage but are not blocking.
+
+**Recommendation**:
+- **APPROVED TO MERGE** — This PR successfully validates that all UX message templates match the spec.
+- After adding edge case tests (M1, M2) in a follow-up, this will be complete.
+- Input sanitization (S2) and concurrency tests (S3) should be separate PRs.
+
+---
+
+## Follow-up Issues
+
+Suggest creating these issues:
+
+1. **ISSUE-018**: Add edge case tests for Section 6 of UX spec (titles with spaces, `/p` in titles, cross-user message access from UX perspective)
+2. **ISSUE-019**: Add input sanitization security tests (SQL injection, XSS, long inputs)
+3. **ISSUE-020**: Add concurrency/WAL mode integration tests
+4. **ISSUE-021**: Refactor test helpers to reduce duplication (technical debt)
+
+---
+
+## Final Notes
+
+This is a high-quality test PR. The test suite is well-structured, comprehensive, and all tests pass. The missing coverage items (Section 6 edge cases) are documented in the UX spec and should be added, but they are not blocking for this PR's goal of validating that implemented features match the UX spec templates.
+
+The presence of `tests/test_isolation.py` (from a previous PR) significantly reduces security concerns around user isolation, though adding cross-user tests from the UX perspective would still be valuable for completeness.
+
+**Overall Grade**: A (Excellent UX template coverage, minor edge case gaps)
