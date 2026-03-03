@@ -67,3 +67,39 @@ def insert_archive(
     )
     conn.commit()
     return cur.lastrowid  # type: ignore[return-value]
+
+
+def find_project(
+    conn: sqlite3.Connection, user_id: str, name: str
+) -> tuple[int, str] | None:
+    """Find a project by user_id and name. Returns (id, name) or None."""
+    row = conn.execute(
+        "SELECT id, name FROM projects WHERE user_id = ? AND name = ?",
+        (user_id, name),
+    ).fetchone()
+    return (row[0], row[1]) if row else None
+
+
+def list_archives(conn: sqlite3.Connection, user_id: str) -> list[tuple]:
+    """List all archives for a user, newest first."""
+    return conn.execute(
+        "SELECT a.id, a.title, a.link, p.name, a.created_at "
+        "FROM archives a "
+        "LEFT JOIN projects p ON a.project_id = p.id "
+        "WHERE a.user_id = ? "
+        "ORDER BY a.created_at DESC",
+        (user_id,),
+    ).fetchall()
+
+
+def list_archives_by_project(
+    conn: sqlite3.Connection, user_id: str, project_id: int
+) -> list[tuple]:
+    """List archives for a user filtered by project, newest first."""
+    return conn.execute(
+        "SELECT a.id, a.title, a.link, a.created_at "
+        "FROM archives a "
+        "WHERE a.user_id = ? AND a.project_id = ? "
+        "ORDER BY a.created_at DESC",
+        (user_id, project_id),
+    ).fetchall()
