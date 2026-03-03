@@ -131,3 +131,26 @@ def search_archives_by_project(
         "ORDER BY a.created_at DESC",
         (user_id, project_id, f"%{keyword}%"),
     ).fetchall()
+
+
+def get_archive_title(
+    conn: sqlite3.Connection, archive_id: int, user_id: str
+) -> str | None:
+    """Get the title of an archive owned by user_id, or None if not found."""
+    row = conn.execute(
+        "SELECT title FROM archives WHERE id = ? AND user_id = ?",
+        (archive_id, user_id),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def update_archive_title(
+    conn: sqlite3.Connection, archive_id: int, user_id: str, new_title: str
+) -> bool:
+    """Update archive title. Returns True if a row was updated."""
+    cur = conn.execute(
+        "UPDATE archives SET title = ? WHERE id = ? AND user_id = ?",
+        (new_title, archive_id, user_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
