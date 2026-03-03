@@ -1,0 +1,19 @@
+{
+  "id": "openclaw-archiver",
+  "name": "openclaw-archiver",
+  "version": "0.1.0",
+  "description": "Bridge plugin that forwards /archive commands to the Python HTTP server",
+  "main": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "serverUrl": {
+        "type": "string",
+        "minLength": 1,
+        "default": "http://127.0.0.1:8201",
+        "description": "Python Archiver server URL"
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "openclaw-archiver",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw bridge plugin for the Python Archiver server",
+  "main": "index.ts",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "index.ts",
+    "openclaw.plugin.json"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}
