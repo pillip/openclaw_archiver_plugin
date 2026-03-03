@@ -4,6 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
+# IMPORTANT: Set User= and Group= to a non-root service account before deploying.
+# Without these, the service runs as root and %h resolves to /root.
+# Example: User=openclaw  Group=openclaw
 ExecStart=/usr/local/bin/openclaw-archiver-server
 Restart=on-failure
 RestartSec=5
