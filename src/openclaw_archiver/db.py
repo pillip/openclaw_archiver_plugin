@@ -38,3 +38,32 @@ def get_connection(db_path: str | None = None) -> sqlite3.Connection:
     run_migrations(conn)
 
     return conn
+
+
+def get_or_create_project(conn: sqlite3.Connection, user_id: str, name: str) -> int:
+    """Return the project id for *user_id* / *name*, creating it if needed."""
+    conn.execute(
+        "INSERT OR IGNORE INTO projects (user_id, name) VALUES (?, ?)",
+        (user_id, name),
+    )
+    row = conn.execute(
+        "SELECT id FROM projects WHERE user_id = ? AND name = ?",
+        (user_id, name),
+    ).fetchone()
+    return row[0]  # type: ignore[index]
+
+
+def insert_archive(
+    conn: sqlite3.Connection,
+    user_id: str,
+    project_id: int | None,
+    title: str,
+    link: str,
+) -> int:
+    """Insert an archive row and return the new row id."""
+    cur = conn.execute(
+        "INSERT INTO archives (user_id, project_id, title, link) VALUES (?, ?, ?, ?)",
+        (user_id, project_id, title, link),
+    )
+    conn.commit()
+    return cur.lastrowid  # type: ignore[return-value]
