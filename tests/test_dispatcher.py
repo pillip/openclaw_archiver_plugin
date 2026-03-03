@@ -20,6 +20,12 @@ class TestPluginHandleMessage:
     def test_empty_message_returns_none(self) -> None:
         assert handle_message("", "U01") is None
 
+    def test_archive_prefix_without_space_returns_none(self) -> None:
+        """'/archivesave' should NOT be treated as '/archive save'."""
+        assert handle_message("/archivesave", "U01") is None
+        assert handle_message("/archiver", "U01") is None
+        assert handle_message("/archives", "U01") is None
+
     def test_archive_no_subcommand_returns_unknown(self) -> None:
         assert handle_message("/archive", "U01") == _UNKNOWN_MSG
 

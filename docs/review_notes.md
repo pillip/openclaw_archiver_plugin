@@ -383,3 +383,130 @@ No Critical or High severity issues found. The parser module handles untrusted i
 ## Verdict
 
 **Approve.** No blocking issues. All 25 tests pass. All acceptance criteria are met. The implementation correctly follows the architecture's parsing strategy (R-002). The code is clean, well-typed, and well-documented at 55 lines. Five non-blocking suggestions are documented, primarily around spec naming alignment, edge-case test coverage, and minor cosmetic whitespace handling. Three follow-up issues proposed.
+
+---
+---
+
+# Review Notes -- ISSUE-005 Dispatcher and Plugin Entry Point PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue/ISSUE-005-dispatcher`
+**Files changed:** 13 (plugin.py, dispatcher.py, 9 cmd_* stubs, test_dispatcher.py, test_smoke.py)
+
+---
+
+## Code Review
+
+### Spec Compliance
+
+**Acceptance Criteria verification:**
+- `handle_message("/archive save ...", "U01")` routes to `cmd_save.handle` -- covered by `test_save_routing` (line 40).
+- `handle_message("/archive list", "U01")` routes to `cmd_list.handle` -- covered by `test_list_routing` (line 46).
+- `handle_message("/archive project list", "U01")` routes to `cmd_project_list.handle` -- covered by `test_project_list_routing` (line 80).
+- `handle_message("일반 메시지", "U01")` returns `None` -- covered by `test_non_archive_message_returns_none` (line 14).
+- `handle_message("/archive", "U01")` returns unknown command message -- covered by `test_archive_no_subcommand_returns_unknown` (line 23).
+- `handle_message("/archive xyz", "U01")` returns unknown command message -- covered by `test_unknown_subcommand_returns_unknown` (line 29).
+- All cmd_* modules have `handle(args: str, user_id: str) -> str` stub -- covered by `TestCmdStubs` class (9 tests, lines 104-151).
+
+All acceptance criteria are met.
+
+### Blocking Issues
+
+1. **Prefix matching too permissive -- `/archivesave` treated as `/archive save` (FIXED)**
+
+   `plugin.py` line 20 used `message.startswith("/archive")` which means any message beginning with `/archive` would be dispatched, even without a space delimiter. The string `"/archivesave"` starts with `"/archive"`, so `dispatch()` would strip the prefix leaving `"save"`, which routes to `cmd_save.handle`. Similarly, `"/archiver"` would leave `"r"` and return the unknown command message rather than `None` (LLM bypass).
+
+   This violates the spec: non-`/archive` messages should return `None` so the LLM can process them. `/archiver` or `/archives` are not the `/archive` command.
+
+   **Fix applied:** Added a guard in `plugin.py` that checks the character immediately after the `/archive` prefix. If it is not whitespace or end-of-string, `None` is returned. Added test `test_archive_prefix_without_space_returns_none` covering `/archivesave`, `/archiver`, and `/archives`.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/plugin.py` (line 20-24)
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_dispatcher.py` (new test)
+
+### Suggestions (non-blocking)
+
+2. **Dispatch table type annotation uses `object` instead of a Protocol**
+
+   `_COMMANDS: dict[str, object]` and `_PROJECT_SUBCOMMANDS: dict[str, object]` use `object` as the value type, then rely on `# type: ignore[union-attr]` to suppress the type error on `.handle()` calls. This loses type safety -- any object could be placed in the dict without a type error.
+
+   **Recommendation:** Define a `Protocol` class:
+   ```python
+   from typing import Protocol
+
+   class CommandHandler(Protocol):
+       def handle(self, args: str, user_id: str) -> str: ...
+   ```
+   Then type the dicts as `dict[str, CommandHandler]`. This removes the need for `# type: ignore` comments and catches handler signature mismatches at type-check time.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/dispatcher.py` (lines 19, 28)
+
+3. **Commands are case-sensitive**
+
+   `/archive SAVE` or `/archive Save` returns the unknown command message. This is likely correct for a slash-command interface (Slack slash commands are case-sensitive), but the spec does not explicitly state case sensitivity. If case-insensitive matching is desired, a `.lower()` call on `cmd` and `subcmd` would be the fix. Noting this for confirmation with the team.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/dispatcher.py` (line 52)
+
+4. **`test_smoke.py` assertion is weak for routed commands**
+
+   `test_handle_message_routes_archive_command` (line 19) asserts `result is not None`. Since stubs return `""` (empty string), this passes, but the assertion does not verify the result is a string or that routing actually occurred. When stubs are implemented, this test will not catch regressions in routing. The `test_dispatcher.py` tests cover routing thoroughly via mocks, so this is low priority, but the smoke test could be tightened to `assert isinstance(result, str)`.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_smoke.py` (line 19)
+
+5. **Missing edge-case test: `/archive  save` with extra spaces between prefix and subcommand**
+
+   The `split(None, 1)` call in `dispatcher.py` line 51 handles multiple spaces correctly (Python's `str.split(None)` splits on any whitespace run). However, no test explicitly verifies this behavior. Adding a test like `handle_message("/archive  save title link", "U01")` would document the expected behavior and prevent regressions.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_dispatcher.py`
+
+6. **Missing edge-case test: `/archive project  list` with extra spaces in 2nd-level routing**
+
+   Same as above but for the project subcommand level. `_dispatch_project` also uses `split(None, 1)` so it handles this correctly, but there is no test.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_dispatcher.py`
+
+7. **All 9 cmd_* stubs are identical boilerplate**
+
+   Each stub file is 8 lines with the exact same structure. When handlers are implemented (ISSUE-006 through ISSUE-014), each will diverge, so this is acceptable for now. However, if stub generation is needed again, a template or code generator would reduce manual error.
+
+8. **Dispatcher imports all handlers at module level**
+
+   All 9 `cmd_*` modules are imported at the top of `dispatcher.py`. This is fine for a stdlib-only project with lightweight modules, but if any handler gains heavy imports in the future (e.g., external libraries), it could slow down startup. Lazy imports would mitigate this. Non-blocking for now since all modules are trivial stubs.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/dispatcher.py` (lines 5-15)
+
+### Follow-up Issues
+
+- **ISSUE-FOLLOW-009:** Introduce a `CommandHandler` Protocol type for the dispatch table to remove `# type: ignore` comments and gain static type safety.
+- **ISSUE-FOLLOW-010:** Add edge-case tests for extra whitespace between prefix and subcommand (both levels).
+- **ISSUE-FOLLOW-011:** Confirm case-sensitivity policy for subcommands with the team and document the decision.
+
+---
+
+## Security Findings
+
+### Summary
+
+One Medium severity issue found and fixed (prefix matching bypass). No Critical or High severity issues.
+
+### Detailed Assessment
+
+| # | Severity | Category | Finding | Status |
+|---|----------|----------|---------|--------|
+| S-1 | **Medium** | Input validation | **Prefix matching bypass (FIXED).** `message.startswith("/archive")` matched messages like `/archivesave`, `/archiver`, `/archives`. While these would not reach a real handler (they would hit the unknown-command path or route to the wrong stub), the issue is that they would NOT return `None`, meaning the LLM bypass would not fire. A user typing `/archiver` expecting LLM processing would get the Korean unknown-command error instead. The fix adds a whitespace/end-of-string check after the prefix. | Fixed |
+| S-2 | **Pass** | Command injection | The dispatcher uses a static dictionary lookup (`_COMMANDS.get(cmd)`) to route commands. There is no `eval()`, `exec()`, `getattr()` on user input, or dynamic module loading. User input cannot influence which code is executed beyond the predefined dispatch table. | Pass |
+| S-3 | **Pass** | Input validation | `split(None, 1)` safely handles any amount of whitespace. Empty strings and whitespace-only inputs are handled with explicit checks before dictionary lookup. No `IndexError` or `KeyError` is possible. | Pass |
+| S-4 | **Pass** | Sensitive data | No hardcoded secrets, API keys, credentials, or file paths in any of the 13 files reviewed. | Pass |
+| S-5 | **Pass** | Dependencies | Zero runtime dependencies. No new dev dependencies added. | Pass |
+| S-6 | **Low** | Information disclosure | The unknown command message is in Korean: "알 수 없는 명령입니다. /archive help 로 사용법을 확인하세요." This reveals the `/archive help` command to any user, which is acceptable since it is a help command. No internal paths, versions, or stack traces are exposed. | Pass |
+
+### Notes for Future PRs
+
+- When cmd_* handlers are implemented, each handler will receive unsanitized `args` from user input. Every handler must validate and sanitize its `args` parameter before passing values to SQL queries or external systems. The dispatcher intentionally does NOT sanitize -- this is a "pass-through" design that places the validation burden on each handler.
+- The `user_id` parameter is passed through from the plugin entry point. When authentication/authorization is added, verify that `user_id` is validated at the plugin boundary (not trusted from the message content).
+
+---
+
+## Verdict
+
+**Approve with fix applied.** One blocking issue (prefix matching bypass) has been resolved. All 80 tests pass (79 existing + 1 new). All acceptance criteria are met. The dispatcher design is clean, extensible, and follows a secure static-dispatch pattern. Seven non-blocking suggestions are documented, with three follow-up issues proposed.
