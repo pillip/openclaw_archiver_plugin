@@ -31,6 +31,10 @@ htmlcov/
 # uv
 .python-version
 
+# Node
+node_modules/
+package-lock.json
+
 # Environment
 .env
 .env.local

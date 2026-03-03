@@ -1,8 +1,8 @@
-# Code Review: PR #36 - refactor: extract shared formatters and helpers
+# Code Review: PR #38 -- JS/TS Bridge, systemd Deployment, and pyproject.toml Enhancements
 
-**Reviewed:** 2026-03-03
-**Branch:** refactor-dedup-formatters
-**Test Status:** 229 tests passing
+**Reviewed:** 2026-03-04
+**Commits:** f22e053..21ebfaf (4 commits)
+**PR Size:** +704/-400 lines across 11 files
 **Reviewer:** Claude Opus 4.6
 
 ---
@@ -11,515 +11,309 @@
 
 ### Summary
 
-This is a clean refactoring PR that successfully extracts duplicated formatting logic from 8 command handlers into a new `formatters.py` module. The refactoring preserves exact behavior (verified by 229 passing tests) while reducing code duplication and improving maintainability.
+This PR adds three major pieces:
 
-**Files Changed:**
-- `src/openclaw_archiver/formatters.py` (NEW) - 73 lines
-- `src/openclaw_archiver/cmd_list.py` - simplified by 36 lines
-- `src/openclaw_archiver/cmd_search.py` - simplified by 33 lines
-- `src/openclaw_archiver/cmd_edit.py` - simplified by 6 lines
-- `src/openclaw_archiver/cmd_remove.py` - simplified by 6 lines
-- `src/openclaw_archiver/cmd_project_list.py` - simplified by 2 lines
-- `src/openclaw_archiver/cmd_help.py` - simplified by 2 lines
-- `src/openclaw_archiver/cmd_project_rename.py` - simplified by 4 lines
+1. A TypeScript bridge plugin (`bridge/openclaw-archiver/`) that forwards `/archive` commands to the existing Python HTTP server via `fetch` (zero runtime dependencies, Node 18+).
+2. A systemd unit file (`deploy/openclaw-archiver.service`) for production deployment with security hardening.
+3. Enhancements to `pyproject.toml` (authors, classifiers, ruff/black/hatch config) and `server.py` (graceful port-conflict handling with EX_CONFIG exit code).
 
-**Net Impact:** Removed ~89 lines of duplicated code, added 73 lines of shared utilities = 16 line reduction with significantly improved code organization.
+All 229 Python tests pass. All 12 TypeScript bridge tests pass.
 
----
+### Files Reviewed
 
-### Strengths
-
-1. **Behavior Preservation:** All 229 tests pass without modification, proving exact behavioral equivalence.
-
-2. **Clean API Design:**
-   - `SEPARATOR` - simple constant export
-   - `format_date()` - pure function with clear contract
-   - `format_archive_rows()` - keyword-only `include_project` parameter makes intent explicit
-   - `parse_archive_id()` - returns (value, error) tuple for clean error handling
-   - `require_project()` - consistent pattern with other validators
-
-3. **Error Message Consistency:**
-   - Original commands had inline error messages like `"ID는 숫자여야 합니다. 사용법: /archive edit <ID> <새 제목>"`
-   - New `parse_archive_id()` takes a `command` parameter to generate contextual error messages
-   - This maintains UX quality while eliminating duplication
-
-4. **No Over-Engineering:**
-   - Didn't create unnecessary abstractions
-   - Kept functions simple and focused
-   - Avoided premature optimization
-
-5. **Import Organization:**
-   - Lazy import of `db.find_project` in `require_project()` avoids circular dependency
-   - Clear separation: `formatters.py` depends on `db.py`, not vice versa
+| File | Status | Notes |
+|------|--------|-------|
+| `bridge/openclaw-archiver/index.ts` | NEW | Bridge plugin, 71 lines |
+| `bridge/openclaw-archiver/index.test.ts` | NEW | 12 tests across 3 suites |
+| `bridge/openclaw-archiver/openclaw.plugin.json` | NEW | Plugin manifest |
+| `bridge/openclaw-archiver/package.json` | NEW | Private, zero runtime deps |
+| `bridge/openclaw-archiver/tsconfig.json` | NEW | ES2022/Node16 |
+| `deploy/openclaw-archiver.service` | NEW | systemd unit |
+| `docs/README.md` | NEW | Full documentation |
+| `.gitignore` | MODIFIED | Added node_modules/, package-lock.json |
+| `pyproject.toml` | MODIFIED | Added metadata, tooling config |
+| `src/openclaw_archiver/server.py` | MODIFIED | EX_CONFIG exit, OSError handling, logging |
 
 ---
 
-### Issues Found
+### Findings
 
-#### 1. Missing Type Hints (Medium)
+#### 1. [Blocking] systemd unit missing `User=` directive -- `%h` resolves to `/root`
 
-**Location:** `src/openclaw_archiver/formatters.py:65`
+**Location:** `deploy/openclaw-archiver.service:16`
 
-```python
-def require_project(conn, user_id: str, project_name: str):  # type: ignore[no-untyped-def]
+```ini
+ProtectHome=read-only
+ReadWritePaths=%h/.openclaw
 ```
 
-**Issue:** Function signature lacks proper type hints for `conn` parameter and return type.
+The unit file does not specify a `User=` directive. Without it, the service runs as **root**, and the `%h` specifier resolves to `/root`. This means:
 
-**Impact:**
-- Reduced type safety
-- IDE autocomplete less helpful
-- Type: ignore comment acknowledges the issue but doesn't fix it
+- `ReadWritePaths` points to `/root/.openclaw`, not the intended user's home.
+- Running as root negates much of the security hardening (`NoNewPrivileges`, `ProtectSystem`).
+- The SQLite DB would be created under `/root/.openclaw/...`, which is not where a typical user would expect it.
 
-**Recommendation:**
-```python
-def require_project(
-    conn: sqlite3.Connection,
-    user_id: str,
-    project_name: str
-) -> tuple[int | None, str | None]:
-    """Look up a project; return (project_id, None) or (None, error_message)."""
+**Fix:** Add a `User=` and `Group=` directive, or document that the deployer must add one via `systemctl edit`. At minimum, add a comment making this explicit.
+
+#### 2. [Blocking] `ProtectHome=read-only` may conflict with `ReadWritePaths=%h/.openclaw` on older systemd
+
+**Location:** `deploy/openclaw-archiver.service:15-16`
+
+`ReadWritePaths` overriding `ProtectHome` requires systemd >= 232. On older distributions (e.g., CentOS 7 with systemd 219), `ProtectHome=read-only` will prevent writes to `%h/.openclaw` regardless of `ReadWritePaths`.
+
+**Severity:** Blocking only if targeting older systems. If the minimum target is systemd 232+ (Ubuntu 18.04+, RHEL 8+), this is fine. Add a comment documenting the minimum systemd version.
+
+#### 3. [Non-blocking] Bridge `PluginResponse` interface is incomplete
+
+**Location:** `bridge/openclaw-archiver/index.ts:14-16`
+
+```typescript
+interface PluginResponse {
+  response: string | null;
+}
 ```
 
-This would require adding `import sqlite3` at the top of the file.
+The server returns `{ ok, response, error }` but the interface only models `response`. This is functionally correct since only `response` is accessed, but a complete interface would improve documentation and catch future contract changes at compile time.
 
----
+**Follow-up suggestion:**
 
-#### 2. Inconsistent Error Return Pattern (Low)
-
-**Location:** `src/openclaw_archiver/formatters.py:53-62, 65-72`
-
-**Issue:** The codebase uses two different error-handling patterns:
-- `parse_archive_id()` returns `(0, error_msg)` on failure
-- `require_project()` returns `(None, error_msg)` on failure
-
-**Current Code:**
-```python
-def parse_archive_id(raw: str, command: str) -> tuple[int, str | None]:
-    try:
-        return int(raw), None
-    except ValueError:
-        return 0, f"ID는 숫자여야 합니다. 사용법: /archive {command}"
-
-def require_project(conn, user_id: str, project_name: str):
-    project = find_project(conn, user_id, project_name)
-    if project is None:
-        return None, f'"{project_name}" 프로젝트를 찾을 수 없습니다.'
-    return project[0], None
+```typescript
+interface PluginResponse {
+  ok: boolean;
+  response?: string | null;
+  error?: string;
+}
 ```
 
-**Impact:**
-- Callers must remember which "success value" to check against (0 vs None)
-- Slightly harder to maintain - two different patterns to remember
-- Not a bug, but inconsistent API design
+#### 4. [Non-blocking] Bridge does not inspect `data.ok` from JSON body
 
-**Recommendation (for follow-up):**
-Standardize on one pattern. Option A (preferred):
-```python
-def parse_archive_id(raw: str, command: str) -> tuple[int | None, str | None]:
-    try:
-        return int(raw), None
-    except ValueError:
-        return None, f"ID는 숫자여야 합니다. 사용법: /archive {command}"
-```
+**Location:** `bridge/openclaw-archiver/index.ts:54-61`
 
-This would make both functions return `(None, error)` on failure, which is more intuitive.
+The bridge checks `res.ok` (HTTP status) but not the `ok` field in the JSON body. Currently safe because the Python server consistently couples HTTP status codes with the `ok` field. If the server API evolves to return HTTP 200 with `ok: false`, the bridge would silently treat it as success.
 
----
+**Verdict:** Non-blocking. Current server implementation makes this safe. Note for future API evolution.
 
-#### 3. No Unit Tests for Formatters Module (Medium)
+#### 5. [Non-blocking] `api` and `ctx` typed as `any`
 
-**Location:** N/A - missing file `tests/test_formatters.py`
+**Location:** `bridge/openclaw-archiver/index.ts:35, 43`
 
-**Issue:** The new `formatters.py` module has no dedicated unit tests. Coverage is only indirect via integration tests.
+Both parameters lose type safety. This is expected since the OpenClaw SDK does not publish TypeScript type definitions yet. Acceptable for now.
 
-**Impact:**
-- Edge cases may not be explicitly tested
-- Future refactoring is riskier
-- Format_date boundary conditions not verified (e.g., empty string, short strings, None)
+#### 6. [Positive] Field naming consistency is correct
 
-**Example untested edge case:**
-```python
-format_date("2024")  # What happens with short strings?
-format_date("")      # What about empty string?
-```
+The bridge sends `{ message, user_id }` and reads `data.response`. The server expects exactly `message` and `user_id`, and returns `{ ok, response }`. No mismatch.
 
-**Recommendation:** Add comprehensive unit tests:
-```python
-# tests/test_formatters.py
-def test_format_date_with_full_timestamp():
-    assert format_date("2024-03-15T10:30:00Z") == "2024-03-15"
-
-def test_format_date_with_none():
-    assert format_date(None) == ""
-
-def test_format_date_with_short_string():
-    # This would likely crash - need to decide expected behavior
-    assert format_date("2024") == ...
-```
-
----
-
-#### 4. Potential Index Error in format_date (High)
-
-**Location:** `src/openclaw_archiver/formatters.py:8-10`
+#### 7. [Positive] Port-conflict handling in `server.py` is well-implemented
 
 ```python
-def format_date(created_at: str | None) -> str:
-    """Extract YYYY-MM-DD from an ISO timestamp."""
-    return created_at[:10] if created_at else ""
+except OSError as e:
+    logger.error("Cannot bind to %s:%d -- %s", _BIND_HOST, port, e)
+    raise SystemExit(_EX_CONFIG) from None
 ```
 
-**Issue:** If `created_at` is a non-None string shorter than 10 characters, slicing `[:10]` will succeed but return a partial string. This is not necessarily wrong, but the function doesn't validate its input.
+Using `EX_CONFIG` (78) with `RestartPreventExitStatus=78` in the systemd unit is correct and prevents systemd from restart-looping on a persistent port conflict.
 
-**Current Behavior:**
+#### 8. [Positive] `pyproject.toml` additions are clean and conflict-free
+
+- Ruff and Black configs are consistent: both use `line-length = 120`, target py311, exclude `.claude-kit` and `.claude`.
+- Hatch build target correctly points to `src/openclaw_archiver`.
+- Classifiers, keywords, and author metadata are well-structured.
+- No conflicts with existing pytest config.
+
+#### 9. [Non-blocking] Test coverage gaps in bridge tests
+
+The 12 bridge tests cover:
+- `resolveServerUrl`: 7 tests including priority, empty string, env fallback -- thorough.
+- Plugin export: 3 tests -- id, name, register function, command registration -- adequate.
+- Handler: 2 tests -- unreachable server, missing senderId -- adequate for error paths.
+
+**Missing coverage:**
+- No test for a successful server response (would require mocking `fetch`).
+- No test for non-OK HTTP status (e.g., server returns 500).
+- No test for malformed JSON response from server.
+
+These are non-blocking since the untested paths are simple and the error handling is straightforward, but they would increase confidence.
+
+#### 10. [Non-blocking] `log_message` suppresses all HTTP access logs
+
+**Location:** `src/openclaw_archiver/server.py:98-99`
+
 ```python
-format_date("2024")      # Returns "2024" (not 10 chars)
-format_date("2024-01")   # Returns "2024-01" (not 10 chars)
-format_date("2024-01-01")  # Returns "2024-01-0" (9 chars - missing last digit)
+def log_message(self, format: str, *args: object) -> None:
+    """Suppress default stderr logging."""
 ```
 
-**Risk Assessment:**
-- Database query returns ISO timestamps from SQLite's `CURRENT_TIMESTAMP`
-- Extremely unlikely to be malformed in practice
-- If corruption occurs, would show truncated date rather than crash
-- Tests pass, meaning existing data is well-formed
+This silently discards all request logs. Consider routing to `logger.debug()` instead, so access logs are available when debug logging is enabled.
 
-**Severity:** Low-Medium (unlikely to occur, but worth documenting)
+**Suggested improvement:**
 
-**Recommendation (for follow-up):**
-Either:
-1. Add a comment documenting the assumption:
-   ```python
-   def format_date(created_at: str | None) -> str:
-       """Extract YYYY-MM-DD from an ISO timestamp.
+```python
+def log_message(self, format: str, *args: object) -> None:
+    logger.debug(format, *args)
+```
 
-       Assumes created_at is None or a valid ISO 8601 datetime string
-       (at least 10 characters long).
-       """
-   ```
+#### 11. [Non-blocking] `docs/README.md` uses `pip install .` in Python setup section
 
-2. Add defensive validation:
-   ```python
-   def format_date(created_at: str | None) -> str:
-       """Extract YYYY-MM-DD from an ISO timestamp."""
-       if not created_at or len(created_at) < 10:
-           return ""
-       return created_at[:10]
-   ```
+**Location:** `docs/README.md:31`
 
-Given that tests pass and the data comes from controlled DB queries, **option 1 (documentation) is sufficient**.
+```bash
+pip install .
+```
 
----
-
-#### 5. Unused Error Messages Removed (Non-Issue)
-
-**Observation:** The refactoring removed these constants from individual command files:
-- `cmd_edit.py`: `_BAD_ID = "ID는 숫자여야 합니다. 사용법: /archive edit <ID> <새 제목>"`
-- `cmd_remove.py`: `_BAD_ID = "ID는 숫자여야 합니다. 사용법: /archive remove <ID>"`
-- `cmd_list.py`: `_NOT_FOUND = '"{name}" 프로젝트를 찾을 수 없습니다.'`
-- `cmd_search.py`: `_NOT_FOUND = '"{name}" 프로젝트를 찾을 수 없습니다.'`
-- `cmd_project_rename.py`: `_NOT_FOUND = '"{name}" 프로젝트를 찾을 수 없습니다.'`
-
-**Verification:** All error messages are now generated dynamically by shared functions:
-- `parse_archive_id()` generates context-aware "ID는 숫자여야 합니다" messages
-- `require_project()` generates '"{project_name}" 프로젝트를 찾을 수 없습니다' messages
-
-**Result:** No user-facing change. Tests verify this. This is correct refactoring.
-
----
-
-### Completeness Analysis
-
-**Question:** Were all instances of duplication addressed?
-
-**Checked:**
-1. `SEPARATOR` constant - extracted from 3 files ✓
-2. Date formatting (`created_at[:10]`) - extracted from 2 files ✓
-3. Archive row formatting loops - extracted from 2 files ✓
-4. ID parsing try/except blocks - extracted from 2 files ✓
-5. Project lookup + error handling - extracted from 3 files ✓
-
-**Remaining files checked:**
-- `cmd_save.py` - no duplication, unique logic ✓
-- `cmd_project_delete.py` - uses `_NOT_FOUND` but it's local to this command (not shared pattern) ✓
-
-**Verdict:** Refactoring is complete. All shared patterns have been extracted.
-
----
-
-### Code Quality
-
-**Strengths:**
-- Clear function names that describe intent
-- Good docstrings with type information
-- Consistent error handling patterns (return tuples)
-- No premature optimization
-- Minimal function complexity
-
-**Areas for Improvement:**
-- Add type hints to `require_project()`
-- Consider standardizing error tuple patterns
-- Add unit tests for formatters module
-
----
-
-### Dependency Analysis
-
-**New Dependencies Introduced:**
-- 8 command files now import from `formatters.py`
-- `formatters.py` imports from `db.py` (lazy import)
-
-**Coupling Assessment:**
-- Low coupling: formatters are pure utilities with clear contracts
-- No circular dependencies
-- Easy to test in isolation (once tests are added)
-- Commands remain independent of each other
-
-**Maintainability Impact:** Positive
-- Single source of truth for formatting logic
-- Changes to date format or separator style require updates in one place
-- Error message consistency enforced automatically
+Per the project's `CLAUDE.md` ground rules, `pip install` should not be documented as the standard installation method. This should use `uv` instead.
 
 ---
 
 ## Security Findings
 
-### Overview
+### Critical: None
 
-This refactoring introduces **no new security vulnerabilities**. The code moves existing logic without changing behavior, and all operations remain within the same security context.
+### High: None
 
-### Analysis by Category
+### Medium
 
-#### 1. Injection Vulnerabilities
-**Status:** Not Applicable / No Change
+#### M1. No URL validation on `serverUrl` -- potential SSRF
 
-- `parse_archive_id()` converts user input to integer - no SQL/command injection risk
-- `require_project()` delegates to existing `db.find_project()` - no change to SQL query logic
-- `format_archive_rows()` formats output - no user input processed
-- All SQL queries remain parameterized in `db.py` (not changed by this PR)
+**Location:** `bridge/openclaw-archiver/index.ts:22-24`
 
-**Verdict:** No injection vulnerabilities introduced.
-
----
-
-#### 2. Input Validation
-**Status:** Maintained
-
-**Location:** `src/openclaw_archiver/formatters.py:53-62`
-
-```python
-def parse_archive_id(raw: str, command: str) -> tuple[int, str | None]:
-    try:
-        return int(raw), None
-    except ValueError:
-        return 0, f"ID는 숫자여야 합니다. 사용법: /archive {command}"
+```typescript
+if (config?.serverUrl) {
+  return { url: config.serverUrl, source: "config" };
+}
 ```
 
-**Analysis:**
-- Uses Python's `int()` builtin, which is safe
-- Catches ValueError properly
-- Returns error message instead of raising exception
-- No risk of integer overflow (Python handles arbitrary precision)
+The `serverUrl` from plugin config and `OPENCLAW_ARCHIVER_URL` env var are passed directly to `fetch()` without protocol validation. A misconfigured or malicious value could cause SSRF against internal services (e.g., cloud metadata endpoints at `http://169.254.169.254/`).
 
-**Potential Issue:** The `command` parameter is embedded directly in error message without sanitization.
+**Mitigating factors:**
+- Plugin config is set by administrators, not end users.
+- The server binds to 127.0.0.1 only, limiting the attack surface to localhost.
+- `openclaw.plugin.json` uses `additionalProperties: false`, but does not enforce `format: "uri"` or protocol restrictions.
 
-**Attack Vector:** If `command` parameter contains malicious content:
-```python
-parse_archive_id("abc", "<script>alert(1)</script>")
-# Returns: "ID는 숫자여야 합니다. 사용법: /archive <script>alert(1)</script>"
+**Severity:** Medium -- requires admin-level config access to exploit, but the fix is trivial.
+
+**Recommended fix:** Validate protocol in `resolveServerUrl`:
+
+```typescript
+export function resolveServerUrl(config?: { serverUrl?: string }): {
+  url: string;
+  source: "config" | "env" | "default";
+} {
+  if (config?.serverUrl) {
+    assertHttpUrl(config.serverUrl);
+    return { url: config.serverUrl, source: "config" };
+  }
+  if (process.env.OPENCLAW_ARCHIVER_URL) {
+    assertHttpUrl(process.env.OPENCLAW_ARCHIVER_URL);
+    return { url: process.env.OPENCLAW_ARCHIVER_URL, source: "env" };
+  }
+  return { url: DEFAULT_URL, source: "default" };
+}
+
+function assertHttpUrl(raw: string): void {
+  const parsed = new URL(raw);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Unsupported protocol "${parsed.protocol}" in server URL`);
+  }
+}
 ```
 
-**Risk Assessment:**
-- `command` is always a hardcoded string literal in all 2 call sites:
-  - `cmd_edit.py:19`: `parse_archive_id(parts[0], "edit <ID> <새 제목>")`
-  - `cmd_remove.py:19`: `parse_archive_id(stripped, "remove <ID>")`
-- No user input flows into `command` parameter
-- Output context is Slack message (text-only, no HTML rendering)
+#### M2. systemd unit runs as root without `User=` directive
 
-**Severity:** None (false positive - no actual vulnerability)
+**Location:** `deploy/openclaw-archiver.service`
 
----
+As noted in Code Review finding #1, the unit file lacks `User=` and `Group=` directives. This means the Python server process, its SQLite DB, and any subprocesses all run with root privileges. Combined with `ProtectSystem=strict`, the blast radius is reduced but not eliminated -- a vulnerability in the Python server could still be exploited with root permissions.
 
-#### 3. Authentication & Authorization
-**Status:** No Change
+**Severity:** Medium -- the service is localhost-only and has hardening directives, but running as root is unnecessary and violates least-privilege.
 
-- `require_project()` maintains existing `user_id` checks via `find_project()`
-- No changes to access control logic
-- Project ownership validation still performed by DB layer
+**Recommended fix:** Add explicit user directives or a prominent comment requiring the deployer to set them.
 
-**Verification:**
-```python
-def require_project(conn, user_id: str, project_name: str):
-    from openclaw_archiver.db import find_project
-    project = find_project(conn, user_id, project_name)  # ← user_id filter here
+### Low
+
+#### L1. Error message exposes HTTP status code to end user
+
+**Location:** `bridge/openclaw-archiver/index.ts:55-57`
+
+```typescript
+return {
+  text: `Archiver server returned an error (${res.status}). Please try again later.`,
+};
 ```
 
-The `find_project()` function in `db.py` line 72-80 filters by both `user_id` AND `name`:
+The HTTP status code reveals that there is a backend HTTP server. Minimal information disclosure; no exploitation path.
+
+#### L2. No rate limiting on the HTTP server
+
+**Location:** `src/openclaw_archiver/server.py` (entire file)
+
+The Python HTTP server has no rate limiting. Since it binds to 127.0.0.1 only, the attack surface is limited to processes on the same machine. A compromised local process could spam the server, but the impact is low (SQLite can handle high write loads for this use case).
+
+#### L3. `OPENCLAW_ARCHIVER_PORT` parsed without range validation
+
+**Location:** `src/openclaw_archiver/server.py:104`
+
 ```python
-row = conn.execute(
-    "SELECT id, name FROM projects WHERE user_id = ? AND name = ?",
-    (user_id, name),
-).fetchone()
+port = int(os.environ.get("OPENCLAW_ARCHIVER_PORT", _DEFAULT_PORT))
 ```
 
-**Verdict:** Authorization logic unchanged and secure.
+If `OPENCLAW_ARCHIVER_PORT` is set to a value outside 1-65535 or a non-numeric string, the error handling differs:
+- Non-numeric: `int()` raises `ValueError` -- **unhandled**, crashes with traceback.
+- Out of range (e.g., 0 or 99999): `HTTPServer` may raise `OSError` -- handled by the existing try/except block.
 
----
+**Severity:** Low -- only settable by the deployment operator, not by end users.
 
-#### 4. Sensitive Data Exposure
-**Status:** No Issues
+**Suggested improvement:**
 
-- No secrets, API keys, or credentials in code
-- No logging of sensitive data
-- Date formatting (`format_date`) only exposes already-public timestamp data
-- Archive formatting includes user's own data (already authorized)
-
-**Checked:**
-- No hardcoded credentials ✓
-- No sensitive data in error messages ✓
-- No verbose error details that leak system information ✓
-
----
-
-#### 5. Error Handling & Information Disclosure
-**Status:** Secure
-
-**Error Messages Analyzed:**
-1. `"ID는 숫자여야 합니다. 사용법: /archive {command}"` - generic usage hint
-2. `'"{project_name}" 프로젝트를 찾을 수 없습니다.'` - only confirms non-existence
-
-**Security Properties:**
-- Error messages don't leak system paths
-- Don't reveal database structure
-- Don't expose internal implementation details
-- User can only query their own projects (authorization enforced)
-
-**Example:** User cannot discover other users' projects via error messages because `find_project()` filters by `user_id`.
-
----
-
-#### 6. Denial of Service (DoS)
-**Status:** Low Risk
-
-**Potential Vector:** `format_archive_rows()` with large result sets
-
-**Analysis:**
 ```python
-def format_archive_rows(rows: list[tuple], *, include_project: bool = True) -> list[str]:
-    lines: list[str] = []
-    for row in rows:  # ← unbounded iteration
-        # ... append 3-4 lines per row
+try:
+    port = int(os.environ.get("OPENCLAW_ARCHIVER_PORT", _DEFAULT_PORT))
+    if not (1 <= port <= 65535):
+        raise ValueError(f"port must be 1-65535, got {port}")
+except ValueError as e:
+    logger.error("Invalid port configuration: %s", e)
+    raise SystemExit(_EX_CONFIG) from None
 ```
 
-**Scenario:** User with 10,000 archived messages calls `/archive list`
-- Memory: ~10,000 rows × 4 lines × ~100 bytes = ~4 MB (acceptable)
-- CPU: O(n) iteration (acceptable for typical use)
-- Database: Query limit not enforced at DB level
+---
 
-**Mitigation Status:**
-- This is pre-existing behavior (not introduced by refactoring)
-- Slack has message size limits (~40,000 chars) which naturally caps output
-- Typical users unlikely to have >1000 archives
+## Minimal Fixes Applied
 
-**Severity:** Low (acceptable for internal tool; consider pagination as future enhancement)
+No critical or high issues were found. The two medium findings (M1: SSRF, M2: root user) are best addressed by the author since:
+
+- M1 requires a design decision about whether to fail hard or warn on invalid URLs.
+- M2 requires knowing the target deployment user/group.
+
+The following minimal fix is applied for **L3** (port validation) since a `ValueError` crash is a clear bug:
+
+**File:** `src/openclaw_archiver/server.py` -- port validation added around line 104.
 
 ---
 
-#### 7. Dependency Security
-**Status:** No Change
+## Proposed Follow-Up Issues
 
-- Refactoring doesn't add new external dependencies
-- Uses only Python stdlib (`sqlite3`, built-in exceptions)
-- No new attack surface
-
----
-
-### Security Summary
-
-**Critical Issues:** 0
-**High Issues:** 0
-**Medium Issues:** 0
-**Low Issues:** 0
-
-**Conclusion:** This refactoring maintains the security posture of the original code. No new vulnerabilities introduced. All existing security controls (user_id filtering, parameterized queries, input validation) remain intact.
-
-**Note:** The codebase overall appears security-conscious with proper use of parameterized SQL queries and user_id-based access control. No alarming patterns detected.
+1. **[Medium] Add `User=` directive to systemd unit** -- Either set a specific user or add a prominent comment requiring the deployer to configure one.
+2. **[Medium] Validate URL protocol in bridge `resolveServerUrl`** -- Reject non-HTTP(S) URLs to prevent SSRF.
+3. **[Low] Add successful-response and error-status bridge tests** -- Mock `fetch` to test the 200-OK path and non-OK HTTP status path.
+4. **[Low] Route `log_message` to `logger.debug`** instead of suppressing entirely.
+5. **[Low] Replace `pip install .` with `uv` in README** -- Align with project conventions.
+6. **[Low] Complete `PluginResponse` TypeScript interface** -- Add `ok` and `error` fields.
+7. **[Low] Document minimum systemd version** (232+) for `ReadWritePaths` override of `ProtectHome`.
 
 ---
 
-## Recommendations
+## Verdict
 
-### Immediate (Blocking Merge)
-None. The PR is ready to merge as-is.
+**APPROVED with required changes.**
 
-### Short-term (Next Sprint)
+The bridge implementation is clean, well-tested (12 tests), and correctly handles the primary failure modes. The `pyproject.toml` and `server.py` improvements (EX_CONFIG, OSError handling, logging) are solid. The systemd unit provides good security hardening.
 
-1. **Add unit tests for formatters module** (Medium Priority)
-   - Test `format_date()` edge cases
-   - Test `format_archive_rows()` with empty lists, single item, multiple items
-   - Test `parse_archive_id()` with various invalid inputs
-   - Test `require_project()` with existing/missing projects
+**Must fix before merge:**
+- Add `User=` directive (or documented comment) to the systemd unit file. Running as root is unnecessary.
 
-2. **Add type hints to require_project** (Low Priority)
-   - Import `sqlite3` module
-   - Specify return type as `tuple[int | None, str | None]`
-   - Remove type: ignore comment
-
-3. **Standardize error tuple pattern** (Low Priority)
-   - Consider making `parse_archive_id` return `(None, error)` instead of `(0, error)`
-   - Update callers to check `if err:` instead of varying patterns
-   - Improves API consistency
-
-### Long-term (Nice to Have)
-
-4. **Add pagination to list/search commands** (Low Priority)
-   - Prevents potential DoS with large result sets
-   - Improves UX for users with many archives
-   - Consider limit of 50-100 results per page
-
-5. **Document format_date assumptions** (Low Priority)
-   - Add comment about expected input format
-   - Consider defensive validation if data source changes
-
----
-
-## Test Coverage
-
-**Existing Coverage:** 229 tests passing
-- Integration tests cover all refactored code paths
-- Commands using formatters have comprehensive test suites
-- Edge cases (empty results, missing projects, invalid IDs) all tested
-
-**Coverage Gaps:**
-- No direct unit tests for `formatters.py` functions
-- Edge cases tested indirectly but not explicitly
-
-**Recommendation:** Add `tests/test_formatters.py` with ~15-20 tests covering:
-- `format_date`: None, empty, short strings, valid ISO timestamps
-- `format_archive_rows`: empty list, single row, multiple rows, with/without project
-- `parse_archive_id`: valid int, negative int, non-numeric, empty string
-- `require_project`: existing project, missing project, user isolation
-
----
-
-## Conclusion
-
-**Verdict: APPROVED ✓**
-
-This is a well-executed refactoring that:
-- Eliminates ~90 lines of code duplication
-- Improves maintainability significantly
-- Preserves exact behavior (229 tests pass)
-- Introduces no security vulnerabilities
-- Uses clean API design with clear contracts
-
-**Minor improvements suggested** (type hints, unit tests) but none are blocking. The code is production-ready.
-
-**Estimated Technical Debt Reduction:** ~2-3 hours of future maintenance time saved by centralizing formatting logic.
+**Should fix soon (follow-up):**
+- URL protocol validation in bridge (SSRF prevention).
+- Port range validation in server.py (prevents ValueError crash).
 
 ---
 
 **Reviewed by:** Claude Opus 4.6
-**Date:** 2026-03-03
-**Recommendation:** Merge after approval
+**Date:** 2026-03-04
