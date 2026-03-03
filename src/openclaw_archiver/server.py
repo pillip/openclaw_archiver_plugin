@@ -101,7 +101,13 @@ class _Handler(BaseHTTPRequestHandler):
 def run() -> None:
     """Start the HTTP bridge server."""
     port = int(os.environ.get("OPENCLAW_ARCHIVER_PORT", _DEFAULT_PORT))
-    server = HTTPServer((_BIND_HOST, port), _Handler)
+    try:
+        server = HTTPServer((_BIND_HOST, port), _Handler)
+    except OSError as e:
+        print(f"Error: cannot bind to {_BIND_HOST}:{port} — {e}")
+        print("Hint: another process may be using this port. "
+              "Set OPENCLAW_ARCHIVER_PORT to use a different port.")
+        raise SystemExit(1) from None
     print(f"Archiver server listening on {_BIND_HOST}:{port}")
     try:
         server.serve_forever()

@@ -1,8 +1,8 @@
-# Code Review: PR #36 - refactor: extract shared formatters and helpers
+# Code Review: PR #38 - devops: add JS/TS bridge package and enhance pyproject.toml
 
-**Reviewed:** 2026-03-03
-**Branch:** refactor-dedup-formatters
-**Test Status:** 229 tests passing
+**Reviewed:** 2026-03-04
+**Commit:** f22e053
+**PR Size:** 163 lines added across 5 files (well within review limits)
 **Reviewer:** Claude Opus 4.6
 
 ---
@@ -11,515 +11,326 @@
 
 ### Summary
 
-This is a clean refactoring PR that successfully extracts duplicated formatting logic from 8 command handlers into a new `formatters.py` module. The refactoring preserves exact behavior (verified by 229 passing tests) while reducing code duplication and improving maintainability.
+This PR adds a TypeScript bridge plugin (`bridge/openclaw-archiver/`) that forwards `/archive` commands to the existing Python HTTP server on port 8201, plus metadata and tooling enhancements to `pyproject.toml`. The bridge is lightweight (zero runtime dependencies, uses Node 18+ built-in `fetch`) and the implementation is clean.
 
-**Files Changed:**
-- `src/openclaw_archiver/formatters.py` (NEW) - 73 lines
-- `src/openclaw_archiver/cmd_list.py` - simplified by 36 lines
-- `src/openclaw_archiver/cmd_search.py` - simplified by 33 lines
-- `src/openclaw_archiver/cmd_edit.py` - simplified by 6 lines
-- `src/openclaw_archiver/cmd_remove.py` - simplified by 6 lines
-- `src/openclaw_archiver/cmd_project_list.py` - simplified by 2 lines
-- `src/openclaw_archiver/cmd_help.py` - simplified by 2 lines
-- `src/openclaw_archiver/cmd_project_rename.py` - simplified by 4 lines
+### Files Reviewed
 
-**Net Impact:** Removed ~89 lines of duplicated code, added 73 lines of shared utilities = 16 line reduction with significantly improved code organization.
-
----
-
-### Strengths
-
-1. **Behavior Preservation:** All 229 tests pass without modification, proving exact behavioral equivalence.
-
-2. **Clean API Design:**
-   - `SEPARATOR` - simple constant export
-   - `format_date()` - pure function with clear contract
-   - `format_archive_rows()` - keyword-only `include_project` parameter makes intent explicit
-   - `parse_archive_id()` - returns (value, error) tuple for clean error handling
-   - `require_project()` - consistent pattern with other validators
-
-3. **Error Message Consistency:**
-   - Original commands had inline error messages like `"ID는 숫자여야 합니다. 사용법: /archive edit <ID> <새 제목>"`
-   - New `parse_archive_id()` takes a `command` parameter to generate contextual error messages
-   - This maintains UX quality while eliminating duplication
-
-4. **No Over-Engineering:**
-   - Didn't create unnecessary abstractions
-   - Kept functions simple and focused
-   - Avoided premature optimization
-
-5. **Import Organization:**
-   - Lazy import of `db.find_project` in `require_project()` avoids circular dependency
-   - Clear separation: `formatters.py` depends on `db.py`, not vice versa
+| File | Type | Lines |
+|------|------|-------|
+| `bridge/openclaw-archiver/index.ts` | NEW | 71 |
+| `bridge/openclaw-archiver/openclaw.plugin.json` | NEW | 19 |
+| `bridge/openclaw-archiver/package.json` | NEW | 27 |
+| `bridge/openclaw-archiver/tsconfig.json` | NEW | 13 |
+| `pyproject.toml` | MODIFIED | +33 |
+| `src/openclaw_archiver/server.py` | Reference (unchanged) | 112 |
 
 ---
 
-### Issues Found
+### Findings
 
-#### 1. Missing Type Hints (Medium)
+#### 1. Field naming consistency between bridge and server -- GOOD (Non-Issue)
 
-**Location:** `src/openclaw_archiver/formatters.py:65`
+The bridge sends `{ message, user_id }` (line 51 of `index.ts`), and the server expects `data.get("message")` and `data.get("user_id")` (lines 66-67 of `server.py`). These match correctly.
 
-```python
-def require_project(conn, user_id: str, project_name: str):  # type: ignore[no-untyped-def]
+The bridge reads `data.response` from the server response (line 61 of `index.ts`), and the server returns `{ "ok": True, "response": response }` (lines 78-80 of `server.py`). This also matches.
+
+No field naming mismatch detected.
+
+#### 2. Bridge does not check the `ok` field from server response (Low)
+
+**Location:** `bridge/openclaw-archiver/index.ts:54-61`
+
+```typescript
+if (!res.ok) {
+  return { text: `Archiver server returned an error (${res.status}).` };
+}
+const data: PluginResponse = await res.json();
+return { text: data.response ?? "" };
 ```
 
-**Issue:** Function signature lacks proper type hints for `conn` parameter and return type.
+The bridge checks HTTP status via `res.ok` but does not inspect `data.ok` from the JSON body. Currently, the Python server consistently returns HTTP 200 with `"ok": true` for success and HTTP 4xx/5xx with `"ok": false` for errors, so this is fine in practice. However, if the server ever returns HTTP 200 with `"ok": false` (a pattern used by some APIs), the bridge would silently treat it as success.
 
-**Impact:**
-- Reduced type safety
-- IDE autocomplete less helpful
-- Type: ignore comment acknowledges the issue but doesn't fix it
+**Verdict:** Non-blocking. Current server implementation makes this safe. Document as a follow-up if the server API evolves.
 
-**Recommendation:**
-```python
-def require_project(
-    conn: sqlite3.Connection,
-    user_id: str,
-    project_name: str
-) -> tuple[int | None, str | None]:
-    """Look up a project; return (project_id, None) or (None, error_message)."""
+#### 3. `PluginResponse` interface is incomplete (Low)
+
+**Location:** `bridge/openclaw-archiver/index.ts:14-16`
+
+```typescript
+interface PluginResponse {
+  response: string | null;
+}
 ```
 
-This would require adding `import sqlite3` at the top of the file.
+The server returns `{ "ok": bool, "response": string, "error"?: string }`, but the TypeScript interface only models the `response` field. This is technically fine since only `response` is used, but a complete interface would improve type safety and documentation.
 
----
-
-#### 2. Inconsistent Error Return Pattern (Low)
-
-**Location:** `src/openclaw_archiver/formatters.py:53-62, 65-72`
-
-**Issue:** The codebase uses two different error-handling patterns:
-- `parse_archive_id()` returns `(0, error_msg)` on failure
-- `require_project()` returns `(None, error_msg)` on failure
-
-**Current Code:**
-```python
-def parse_archive_id(raw: str, command: str) -> tuple[int, str | None]:
-    try:
-        return int(raw), None
-    except ValueError:
-        return 0, f"ID는 숫자여야 합니다. 사용법: /archive {command}"
-
-def require_project(conn, user_id: str, project_name: str):
-    project = find_project(conn, user_id, project_name)
-    if project is None:
-        return None, f'"{project_name}" 프로젝트를 찾을 수 없습니다.'
-    return project[0], None
+**Suggestion for follow-up:**
+```typescript
+interface PluginResponse {
+  ok: boolean;
+  response?: string | null;
+  error?: string;
+}
 ```
 
-**Impact:**
-- Callers must remember which "success value" to check against (0 vs None)
-- Slightly harder to maintain - two different patterns to remember
-- Not a bug, but inconsistent API design
+#### 4. `ctx.args` fallback string construction (Low)
 
-**Recommendation (for follow-up):**
-Standardize on one pattern. Option A (preferred):
-```python
-def parse_archive_id(raw: str, command: str) -> tuple[int | None, str | None]:
-    try:
-        return int(raw), None
-    except ValueError:
-        return None, f"ID는 숫자여야 합니다. 사용법: /archive {command}"
+**Location:** `bridge/openclaw-archiver/index.ts:44`
+
+```typescript
+const text = `/archive ${ctx.args ?? ""}`.trim();
 ```
 
-This would make both functions return `(None, error)` on failure, which is more intuitive.
+When `ctx.args` is undefined/null, this produces `/archive` after trim. This is fine and the Python dispatcher should handle bare `/archive` (routing to help). Correct behavior.
 
----
+#### 5. `api` parameter typed as `any` (Low)
 
-#### 3. No Unit Tests for Formatters Module (Medium)
+**Location:** `bridge/openclaw-archiver/index.ts:35, 43`
 
-**Location:** N/A - missing file `tests/test_formatters.py`
-
-**Issue:** The new `formatters.py` module has no dedicated unit tests. Coverage is only indirect via integration tests.
-
-**Impact:**
-- Edge cases may not be explicitly tested
-- Future refactoring is riskier
-- Format_date boundary conditions not verified (e.g., empty string, short strings, None)
-
-**Example untested edge case:**
-```python
-format_date("2024")  # What happens with short strings?
-format_date("")      # What about empty string?
+```typescript
+register(api: any) {
+  // ...
+  handler: async (ctx: any) => {
 ```
 
-**Recommendation:** Add comprehensive unit tests:
-```python
-# tests/test_formatters.py
-def test_format_date_with_full_timestamp():
-    assert format_date("2024-03-15T10:30:00Z") == "2024-03-15"
+Both `api` and `ctx` are typed as `any`, which loses all type safety. This is likely because the OpenClaw SDK does not yet publish TypeScript type definitions. Acceptable for now, but should be improved when types become available.
 
-def test_format_date_with_none():
-    assert format_date(None) == ""
+#### 6. pyproject.toml additions are correct and well-structured (Positive)
 
-def test_format_date_with_short_string():
-    # This would likely crash - need to decide expected behavior
-    assert format_date("2024") == ...
+- Authors, keywords, classifiers added properly
+- Ruff and Black configs are consistent (both use `line-length = 120`, target py311)
+- Both exclude `.claude-kit` and `.claude` directories
+- Hatch build target correctly points to `src/openclaw_archiver`
+- Pytest config was already present; no conflicts introduced
+
+#### 7. No tests for the bridge (Medium)
+
+There are no tests for the TypeScript bridge. While the bridge is simple, at minimum:
+- `resolveServerUrl()` is a pure function that could be unit tested
+- The handler's error paths (server down, non-OK response) should have tests
+
+**Recommendation:** Add a `bridge/openclaw-archiver/__tests__/` directory with tests for `resolveServerUrl` and mock-based handler tests.
+
+#### 8. `package.json` marks `main` as `index.ts` not compiled output (Low)
+
+**Location:** `bridge/openclaw-archiver/package.json:6`
+
+```json
+"main": "index.ts"
 ```
 
----
+The `tsconfig.json` specifies `"outDir": "dist"`, but `main` points to the raw `.ts` file, not `dist/index.js`. This works if the OpenClaw runtime supports TypeScript directly (e.g., via ts-node or Bun), but would fail with a standard Node.js runtime expecting compiled JS.
 
-#### 4. Potential Index Error in format_date (High)
-
-**Location:** `src/openclaw_archiver/formatters.py:8-10`
-
-```python
-def format_date(created_at: str | None) -> str:
-    """Extract YYYY-MM-DD from an ISO timestamp."""
-    return created_at[:10] if created_at else ""
-```
-
-**Issue:** If `created_at` is a non-None string shorter than 10 characters, slicing `[:10]` will succeed but return a partial string. This is not necessarily wrong, but the function doesn't validate its input.
-
-**Current Behavior:**
-```python
-format_date("2024")      # Returns "2024" (not 10 chars)
-format_date("2024-01")   # Returns "2024-01" (not 10 chars)
-format_date("2024-01-01")  # Returns "2024-01-0" (9 chars - missing last digit)
-```
-
-**Risk Assessment:**
-- Database query returns ISO timestamps from SQLite's `CURRENT_TIMESTAMP`
-- Extremely unlikely to be malformed in practice
-- If corruption occurs, would show truncated date rather than crash
-- Tests pass, meaning existing data is well-formed
-
-**Severity:** Low-Medium (unlikely to occur, but worth documenting)
-
-**Recommendation (for follow-up):**
-Either:
-1. Add a comment documenting the assumption:
-   ```python
-   def format_date(created_at: str | None) -> str:
-       """Extract YYYY-MM-DD from an ISO timestamp.
-
-       Assumes created_at is None or a valid ISO 8601 datetime string
-       (at least 10 characters long).
-       """
-   ```
-
-2. Add defensive validation:
-   ```python
-   def format_date(created_at: str | None) -> str:
-       """Extract YYYY-MM-DD from an ISO timestamp."""
-       if not created_at or len(created_at) < 10:
-           return ""
-       return created_at[:10]
-   ```
-
-Given that tests pass and the data comes from controlled DB queries, **option 1 (documentation) is sufficient**.
-
----
-
-#### 5. Unused Error Messages Removed (Non-Issue)
-
-**Observation:** The refactoring removed these constants from individual command files:
-- `cmd_edit.py`: `_BAD_ID = "ID는 숫자여야 합니다. 사용법: /archive edit <ID> <새 제목>"`
-- `cmd_remove.py`: `_BAD_ID = "ID는 숫자여야 합니다. 사용법: /archive remove <ID>"`
-- `cmd_list.py`: `_NOT_FOUND = '"{name}" 프로젝트를 찾을 수 없습니다.'`
-- `cmd_search.py`: `_NOT_FOUND = '"{name}" 프로젝트를 찾을 수 없습니다.'`
-- `cmd_project_rename.py`: `_NOT_FOUND = '"{name}" 프로젝트를 찾을 수 없습니다.'`
-
-**Verification:** All error messages are now generated dynamically by shared functions:
-- `parse_archive_id()` generates context-aware "ID는 숫자여야 합니다" messages
-- `require_project()` generates '"{project_name}" 프로젝트를 찾을 수 없습니다' messages
-
-**Result:** No user-facing change. Tests verify this. This is correct refactoring.
-
----
-
-### Completeness Analysis
-
-**Question:** Were all instances of duplication addressed?
-
-**Checked:**
-1. `SEPARATOR` constant - extracted from 3 files ✓
-2. Date formatting (`created_at[:10]`) - extracted from 2 files ✓
-3. Archive row formatting loops - extracted from 2 files ✓
-4. ID parsing try/except blocks - extracted from 2 files ✓
-5. Project lookup + error handling - extracted from 3 files ✓
-
-**Remaining files checked:**
-- `cmd_save.py` - no duplication, unique logic ✓
-- `cmd_project_delete.py` - uses `_NOT_FOUND` but it's local to this command (not shared pattern) ✓
-
-**Verdict:** Refactoring is complete. All shared patterns have been extracted.
-
----
-
-### Code Quality
-
-**Strengths:**
-- Clear function names that describe intent
-- Good docstrings with type information
-- Consistent error handling patterns (return tuples)
-- No premature optimization
-- Minimal function complexity
-
-**Areas for Improvement:**
-- Add type hints to `require_project()`
-- Consider standardizing error tuple patterns
-- Add unit tests for formatters module
-
----
-
-### Dependency Analysis
-
-**New Dependencies Introduced:**
-- 8 command files now import from `formatters.py`
-- `formatters.py` imports from `db.py` (lazy import)
-
-**Coupling Assessment:**
-- Low coupling: formatters are pure utilities with clear contracts
-- No circular dependencies
-- Easy to test in isolation (once tests are added)
-- Commands remain independent of each other
-
-**Maintainability Impact:** Positive
-- Single source of truth for formatting logic
-- Changes to date format or separator style require updates in one place
-- Error message consistency enforced automatically
+**Question for the author:** Does the OpenClaw plugin loader handle `.ts` files natively? If not, `main` should point to `dist/index.js` and the build step should be documented.
 
 ---
 
 ## Security Findings
 
-### Overview
+### Critical: None
 
-This refactoring introduces **no new security vulnerabilities**. The code moves existing logic without changing behavior, and all operations remain within the same security context.
+### High: None
 
-### Analysis by Category
+### Medium
 
-#### 1. Injection Vulnerabilities
-**Status:** Not Applicable / No Change
+#### M1. No URL validation on `serverUrl` config input
 
-- `parse_archive_id()` converts user input to integer - no SQL/command injection risk
-- `require_project()` delegates to existing `db.find_project()` - no change to SQL query logic
-- `format_archive_rows()` formats output - no user input processed
-- All SQL queries remain parameterized in `db.py` (not changed by this PR)
+**Location:** `bridge/openclaw-archiver/index.ts:22-24`
 
-**Verdict:** No injection vulnerabilities introduced.
-
----
-
-#### 2. Input Validation
-**Status:** Maintained
-
-**Location:** `src/openclaw_archiver/formatters.py:53-62`
-
-```python
-def parse_archive_id(raw: str, command: str) -> tuple[int, str | None]:
-    try:
-        return int(raw), None
-    except ValueError:
-        return 0, f"ID는 숫자여야 합니다. 사용법: /archive {command}"
+```typescript
+if (config?.serverUrl) {
+  return { url: config.serverUrl, source: "config" };
+}
 ```
 
-**Analysis:**
-- Uses Python's `int()` builtin, which is safe
-- Catches ValueError properly
-- Returns error message instead of raising exception
-- No risk of integer overflow (Python handles arbitrary precision)
+The `serverUrl` from plugin config and the `OPENCLAW_ARCHIVER_URL` environment variable are used directly in `fetch()` without validation. A malicious or misconfigured value could cause:
 
-**Potential Issue:** The `command` parameter is embedded directly in error message without sanitization.
+- **SSRF (Server-Side Request Forgery):** If an attacker controls plugin config, they could point the bridge at internal services (e.g., `http://169.254.169.254/latest/meta-data/` on AWS).
+- **Protocol confusion:** A `file://` or `ftp://` URL could cause unexpected behavior depending on the Node.js `fetch` implementation.
 
-**Attack Vector:** If `command` parameter contains malicious content:
-```python
-parse_archive_id("abc", "<script>alert(1)</script>")
-# Returns: "ID는 숫자여야 합니다. 사용법: /archive <script>alert(1)</script>"
+**Mitigating factors:**
+- Plugin config is typically set by administrators, not end users
+- The `openclaw.plugin.json` schema has `"additionalProperties": false` which limits config surface
+- The config schema does not enforce URL format (no `"format": "uri"` in JSON Schema)
+
+**Severity:** Medium -- requires admin-level access to exploit, but adding basic URL validation is cheap.
+
+**Recommended fix:**
+```typescript
+function resolveServerUrl(config?: { serverUrl?: string }): { url: string; source: string } {
+  const raw = config?.serverUrl || process.env.OPENCLAW_ARCHIVER_URL || DEFAULT_URL;
+  const source = config?.serverUrl ? "config" : process.env.OPENCLAW_ARCHIVER_URL ? "env" : "default";
+  try {
+    const parsed = new URL(raw);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      throw new Error(`unsupported protocol: ${parsed.protocol}`);
+    }
+    return { url: raw, source };
+  } catch (err) {
+    throw new Error(`Invalid server URL "${raw}": ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 ```
 
-**Risk Assessment:**
-- `command` is always a hardcoded string literal in all 2 call sites:
-  - `cmd_edit.py:19`: `parse_archive_id(parts[0], "edit <ID> <새 제목>")`
-  - `cmd_remove.py:19`: `parse_archive_id(stripped, "remove <ID>")`
-- No user input flows into `command` parameter
-- Output context is Slack message (text-only, no HTML rendering)
+### Low
 
-**Severity:** None (false positive - no actual vulnerability)
+#### L1. Error message leaks HTTP status code to end user
 
----
+**Location:** `bridge/openclaw-archiver/index.ts:55-57`
 
-#### 3. Authentication & Authorization
-**Status:** No Change
-
-- `require_project()` maintains existing `user_id` checks via `find_project()`
-- No changes to access control logic
-- Project ownership validation still performed by DB layer
-
-**Verification:**
-```python
-def require_project(conn, user_id: str, project_name: str):
-    from openclaw_archiver.db import find_project
-    project = find_project(conn, user_id, project_name)  # ← user_id filter here
+```typescript
+return {
+  text: `Archiver server returned an error (${res.status}). Please try again later.`,
+};
 ```
 
-The `find_project()` function in `db.py` line 72-80 filters by both `user_id` AND `name`:
+The HTTP status code is exposed to the end user. While not a serious leak (it is just a number), it reveals internal architecture details (that there is an HTTP backend). For a Slack-facing plugin, a generic "Something went wrong" message would be more appropriate.
+
+**Severity:** Low -- minimal information disclosure, no exploitation path.
+
+#### L2. Server `log_message` suppresses all HTTP access logs
+
+**Location:** `src/openclaw_archiver/server.py:97-98`
+
 ```python
-row = conn.execute(
-    "SELECT id, name FROM projects WHERE user_id = ? AND name = ?",
-    (user_id, name),
-).fetchone()
+def log_message(self, format: str, *args: object) -> None:
+    """Suppress default stderr logging."""
 ```
 
-**Verdict:** Authorization logic unchanged and secure.
+This silently swallows all HTTP request logs. While this avoids noisy stderr output, it also means:
+- No audit trail of who called the server
+- Harder to debug connectivity issues
+- No visibility into failed requests
+
+**Severity:** Low -- operational concern, not directly exploitable. Consider logging at DEBUG level instead of suppressing entirely.
+
+#### L3. No CORS headers on the Python server
+
+**Location:** `src/openclaw_archiver/server.py` (entire file)
+
+The server does not set any CORS headers. This is actually **correct and secure** since the server binds to `127.0.0.1` and is not intended to be called from browsers. Noting this as a positive security posture, not an issue.
+
+**Severity:** Not an issue (positive finding).
 
 ---
 
-#### 4. Sensitive Data Exposure
-**Status:** No Issues
+## Port Conflict / Fallback Analysis
 
-- No secrets, API keys, or credentials in code
-- No logging of sensitive data
-- Date formatting (`format_date`) only exposes already-public timestamp data
-- Archive formatting includes user's own data (already authorized)
+This is the most significant gap in the current implementation.
 
-**Checked:**
-- No hardcoded credentials ✓
-- No sensitive data in error messages ✓
-- No verbose error details that leak system information ✓
+### Scenario 1: Port 8201 is already in use when Python server starts
 
----
+**What happens:** The `run()` function in `server.py` (line 104) calls `HTTPServer((_BIND_HOST, port), _Handler)`. If port 8201 is already bound, Python raises `OSError: [Errno 48] Address already in use` (macOS) or `OSError: [Errno 98] Address already in use` (Linux). This exception is **unhandled** -- it propagates up and crashes the process with a traceback.
 
-#### 5. Error Handling & Information Disclosure
-**Status:** Secure
-
-**Error Messages Analyzed:**
-1. `"ID는 숫자여야 합니다. 사용법: /archive {command}"` - generic usage hint
-2. `'"{project_name}" 프로젝트를 찾을 수 없습니다.'` - only confirms non-existence
-
-**Security Properties:**
-- Error messages don't leak system paths
-- Don't reveal database structure
-- Don't expose internal implementation details
-- User can only query their own projects (authorization enforced)
-
-**Example:** User cannot discover other users' projects via error messages because `find_project()` filters by `user_id`.
-
----
-
-#### 6. Denial of Service (DoS)
-**Status:** Low Risk
-
-**Potential Vector:** `format_archive_rows()` with large result sets
-
-**Analysis:**
 ```python
-def format_archive_rows(rows: list[tuple], *, include_project: bool = True) -> list[str]:
-    lines: list[str] = []
-    for row in rows:  # ← unbounded iteration
-        # ... append 3-4 lines per row
+def run() -> None:
+    port = int(os.environ.get("OPENCLAW_ARCHIVER_PORT", _DEFAULT_PORT))
+    server = HTTPServer((_BIND_HOST, port), _Handler)  # <-- crashes here
+    print(f"Archiver server listening on {_BIND_HOST}:{port}")
 ```
 
-**Scenario:** User with 10,000 archived messages calls `/archive list`
-- Memory: ~10,000 rows × 4 lines × ~100 bytes = ~4 MB (acceptable)
-- CPU: O(n) iteration (acceptable for typical use)
-- Database: Query limit not enforced at DB level
+**Impact:** The server fails to start with an ugly traceback. No retry, no fallback port, no graceful error message.
 
-**Mitigation Status:**
-- This is pre-existing behavior (not introduced by refactoring)
-- Slack has message size limits (~40,000 chars) which naturally caps output
-- Typical users unlikely to have >1000 archives
+**Recommended improvements (follow-up issue):**
 
-**Severity:** Low (acceptable for internal tool; consider pagination as future enhancement)
+1. **Catch `OSError` and provide a clear message:**
+```python
+try:
+    server = HTTPServer((_BIND_HOST, port), _Handler)
+except OSError as e:
+    logger.error("Cannot bind to %s:%d -- %s", _BIND_HOST, port, e)
+    print(f"Error: Port {port} is already in use. Set OPENCLAW_ARCHIVER_PORT to use a different port.", file=sys.stderr)
+    sys.exit(1)
+```
 
----
+2. **Optional: Auto-retry with port increment** (only if the project design allows it -- but this creates a coordination problem with the bridge).
 
-#### 7. Dependency Security
-**Status:** No Change
+### Scenario 2: Bridge cannot reach the Python server (server down or wrong port)
 
-- Refactoring doesn't add new external dependencies
-- Uses only Python stdlib (`sqlite3`, built-in exceptions)
-- No new attack surface
+**What happens:** The bridge's `fetch()` call throws a `TypeError` or `FetchError` (connection refused). This is **correctly handled** by the catch block at line 62-66:
 
----
+```typescript
+} catch (err) {
+  api.logger?.error?.(`fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+  return {
+    text: "Could not reach the Archiver server. Is it running?",
+  };
+}
+```
 
-### Security Summary
+**Impact:** The user sees a friendly error message. The bridge does not crash. This is good.
 
-**Critical Issues:** 0
-**High Issues:** 0
-**Medium Issues:** 0
-**Low Issues:** 0
+**Gap:** The error message does not tell the user which URL was attempted or how to fix the issue. Consider:
+```typescript
+text: `Could not reach the Archiver server at ${archiverUrl}. Is it running?`
+```
+(But this trades operational clarity for slight information leakage -- acceptable for an internal tool.)
 
-**Conclusion:** This refactoring maintains the security posture of the original code. No new vulnerabilities introduced. All existing security controls (user_id filtering, parameterized queries, input validation) remain intact.
+### Scenario 3: No startup health check
 
-**Note:** The codebase overall appears security-conscious with proper use of parameterized SQL queries and user_id-based access control. No alarming patterns detected.
+**What happens:** The bridge registers the command handler immediately during `register()`. It does not verify that the Python server is reachable. If the server is down, every user command will fail with the "Could not reach" error.
 
----
+**Analysis:** This is a **design choice**, not a bug. A startup health check would:
+- Add complexity
+- Create a dependency ordering problem (bridge must start after server)
+- Risk false negatives (server might start moments after bridge)
 
-## Recommendations
+**Recommendation:** Instead of a startup health check, consider a **lazy health check**: on the first command invocation, attempt a GET to `/health` endpoint. If it fails, return a more specific diagnostic message. This is optional and non-blocking.
 
-### Immediate (Blocking Merge)
-None. The PR is ready to merge as-is.
+### Scenario 4: Port mismatch between bridge and server
 
-### Short-term (Next Sprint)
+The bridge defaults to `http://127.0.0.1:8201` (hardcoded in `index.ts:12`). The server defaults to port 8201 (hardcoded in `server.py:16`). Both can be overridden:
 
-1. **Add unit tests for formatters module** (Medium Priority)
-   - Test `format_date()` edge cases
-   - Test `format_archive_rows()` with empty lists, single item, multiple items
-   - Test `parse_archive_id()` with various invalid inputs
-   - Test `require_project()` with existing/missing projects
+- Bridge: `serverUrl` config or `OPENCLAW_ARCHIVER_URL` env var
+- Server: `OPENCLAW_ARCHIVER_PORT` env var
 
-2. **Add type hints to require_project** (Low Priority)
-   - Import `sqlite3` module
-   - Specify return type as `tuple[int | None, str | None]`
-   - Remove type: ignore comment
+**Gap:** There is no shared configuration mechanism. If someone changes the server port via `OPENCLAW_ARCHIVER_PORT=9000` but forgets to update the bridge config, requests silently fail. The bridge's error message ("Could not reach the Archiver server. Is it running?") does not hint at a port mismatch.
 
-3. **Standardize error tuple pattern** (Low Priority)
-   - Consider making `parse_archive_id` return `(None, error)` instead of `(0, error)`
-   - Update callers to check `if err:` instead of varying patterns
-   - Improves API consistency
+**Recommendation (follow-up):** Document the environment variable pairing clearly. Consider having the bridge also read `OPENCLAW_ARCHIVER_PORT` and construct the URL from it, so a single env var controls both sides.
 
-### Long-term (Nice to Have)
+### Comparison with Todo Plugin (Port 8200)
 
-4. **Add pagination to list/search commands** (Low Priority)
-   - Prevents potential DoS with large result sets
-   - Improves UX for users with many archives
-   - Consider limit of 50-100 results per page
+The user mentioned the todo plugin uses port 8200. Without access to the todo plugin source, I cannot do a direct comparison. However, based on the patterns seen here:
 
-5. **Document format_date assumptions** (Low Priority)
-   - Add comment about expected input format
-   - Consider defensive validation if data source changes
+- Both use hardcoded default ports (8200 vs 8201) -- risk of collision is low between the two plugins
+- The fundamental architecture is identical: JS/TS bridge -> Python HTTP server
+- The same gaps (no startup health check, no port-conflict handling) likely exist in both
 
----
+### Summary Table
 
-## Test Coverage
-
-**Existing Coverage:** 229 tests passing
-- Integration tests cover all refactored code paths
-- Commands using formatters have comprehensive test suites
-- Edge cases (empty results, missing projects, invalid IDs) all tested
-
-**Coverage Gaps:**
-- No direct unit tests for `formatters.py` functions
-- Edge cases tested indirectly but not explicitly
-
-**Recommendation:** Add `tests/test_formatters.py` with ~15-20 tests covering:
-- `format_date`: None, empty, short strings, valid ISO timestamps
-- `format_archive_rows`: empty list, single row, multiple rows, with/without project
-- `parse_archive_id`: valid int, negative int, non-numeric, empty string
-- `require_project`: existing project, missing project, user isolation
+| Scenario | Handled? | Severity | Action |
+|----------|----------|----------|--------|
+| Port 8201 in use at server startup | No -- crashes with traceback | Medium | Follow-up issue: catch OSError |
+| Bridge cannot reach server | Yes -- friendly error | N/A | Working correctly |
+| Startup health check | Not implemented | Low | Optional follow-up |
+| Port mismatch between bridge and server | No coordination mechanism | Low | Document env var pairing |
+| Both plugins on same port | Prevented by different defaults | N/A | N/A |
 
 ---
 
-## Conclusion
+## Proposed Follow-Up Issues
 
-**Verdict: APPROVED ✓**
+1. **[Medium] Handle port-in-use error in `server.py:run()`** -- Catch `OSError` on bind, print actionable message, exit cleanly.
+2. **[Medium] Add bridge unit tests** -- Test `resolveServerUrl()` and handler error paths.
+3. **[Medium] Validate `serverUrl` protocol in bridge** -- Reject non-HTTP(S) URLs to prevent SSRF.
+4. **[Low] Document environment variable coordination** -- Explain `OPENCLAW_ARCHIVER_PORT` and `OPENCLAW_ARCHIVER_URL` relationship.
+5. **[Low] Complete `PluginResponse` TypeScript interface** -- Add `ok` and `error` fields.
+6. **[Low] Re-enable server access logging at DEBUG level** -- Replace silent suppression with configurable logging.
 
-This is a well-executed refactoring that:
-- Eliminates ~90 lines of code duplication
-- Improves maintainability significantly
-- Preserves exact behavior (229 tests pass)
-- Introduces no security vulnerabilities
-- Uses clean API design with clear contracts
+---
 
-**Minor improvements suggested** (type hints, unit tests) but none are blocking. The code is production-ready.
+## Verdict
 
-**Estimated Technical Debt Reduction:** ~2-3 hours of future maintenance time saved by centralizing formatting logic.
+**APPROVED with suggestions.**
+
+The bridge implementation is clean, lightweight, and correctly handles the primary failure mode (server unreachable). The `pyproject.toml` enhancements are well-structured. No critical or high-severity issues found.
+
+The main gap is the lack of graceful handling when port 8201 is occupied at server startup -- this should be addressed in a follow-up issue but is not blocking for merge since it is pre-existing behavior in `server.py` (not introduced by this PR).
+
+No source code fixes applied -- all findings are Low or Medium severity and better addressed in dedicated follow-up issues rather than inline patches.
 
 ---
 
 **Reviewed by:** Claude Opus 4.6
-**Date:** 2026-03-03
-**Recommendation:** Merge after approval
+**Date:** 2026-03-04
+**Recommendation:** Merge, then address follow-up issues #1-3 in next sprint
