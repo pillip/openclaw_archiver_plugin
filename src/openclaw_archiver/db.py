@@ -196,3 +196,39 @@ def rename_project(
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def delete_project(
+    conn: sqlite3.Connection, user_id: str, name: str
+) -> int:
+    """Delete a project and unlink its archives.
+
+    Sets project_id=NULL on all archives belonging to the project,
+    then deletes the project row. Both operations run in the same
+    transaction.
+
+    Returns the number of archives unlinked, or -1 if project not found.
+    """
+    row = conn.execute(
+        "SELECT id FROM projects WHERE user_id = ? AND name = ?",
+        (user_id, name),
+    ).fetchone()
+    if row is None:
+        return -1
+
+    project_id = row[0]
+
+    cur = conn.execute(
+        "UPDATE archives SET project_id = NULL "
+        "WHERE project_id = ? AND user_id = ?",
+        (project_id, user_id),
+    )
+    unlinked_count = cur.rowcount
+
+    conn.execute(
+        "DELETE FROM projects WHERE id = ? AND user_id = ?",
+        (project_id, user_id),
+    )
+
+    conn.commit()
+    return unlinked_count
