@@ -184,3 +184,15 @@ def list_projects(
         "ORDER BY p.name",
         (user_id, user_id),
     ).fetchall()
+
+
+def rename_project(
+    conn: sqlite3.Connection, user_id: str, old_name: str, new_name: str
+) -> bool:
+    """Rename a project. Returns True if a row was updated."""
+    cur = conn.execute(
+        "UPDATE projects SET name = ? WHERE user_id = ? AND name = ?",
+        (new_name, user_id, old_name),
+    )
+    conn.commit()
+    return cur.rowcount > 0

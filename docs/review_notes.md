@@ -1275,3 +1275,89 @@ No Critical or High severity issues found. The SQL query uses parameterized bind
 ## Verdict
 
 **Approve.** No blocking issues. All 137 tests pass (5 new + 132 existing). All acceptance criteria are met. The SQL query is well-designed: the LEFT JOIN with the `user_id` condition in the JOIN clause correctly counts archives per project while preserving projects with zero archives. Parameterized queries prevent SQL injection. Data isolation is enforced and tested. Connection management follows the established `try/finally` pattern. The handler is minimal at 31 lines and follows existing codebase conventions. Five non-blocking suggestions documented, primarily around missing edge-case test coverage (zero-archive projects) and a weak isolation test. Three follow-up issues proposed.
+
+---
+
+# Review Notes -- ISSUE-012 Project Rename PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `main` (PR #24)
+**Verdict:** Approve with minor fix applied
+
+---
+
+## Code Review
+
+### Files Reviewed
+
+| File | Lines | Role |
+|------|-------|------|
+| `src/openclaw_archiver/cmd_project_rename.py` | 38 | Command handler |
+| `src/openclaw_archiver/db.py` (new `rename_project` fn) | 10 | DB layer |
+| `tests/test_cmd_project_rename.py` | 104 | Tests (8 cases) |
+
+### Overall Assessment
+
+The implementation is clean, minimal, and follows existing codebase patterns. The handler correctly parses arguments, validates ownership/duplicates, and delegates to a parameterized SQL update. Connection management uses the established `try/finally` pattern. Test coverage is solid across happy path, error cases, and cross-user isolation.
+
+### Bug Fixed (Blocking)
+
+**B-1: Unintended whitespace in success message**
+
+In `cmd_project_rename.py` line 36, the f-string multiline continuation embedded 8 spaces of indentation from the source code into the output message:
+
+```python
+# Before (broken):
+return f"프로젝트 이름을 변경했습니다.\n        {old_name} → {new_name}"
+# Produces: "프로젝트 이름을 변경했습니다.\n        BE → Backend"
+
+# After (fixed):
+return f"프로젝트 이름을 변경했습니다.\n{old_name} → {new_name}"
+```
+
+**Status:** Fixed. All 8 tests pass after fix.
+
+### Suggestions (Non-blocking)
+
+| # | Category | Description | Suggestion |
+|---|----------|-------------|------------|
+| NB-1 | Edge case | Extra arguments (3+ tokens) are silently ignored. `"BE Backend ExtraStuff"` renames successfully, discarding `ExtraStuff`. | Consider validating `len(parts) == 2` (not `< 2`) and returning a usage hint, or document that extra tokens are ignored by design. |
+| NB-2 | Edge case | Renaming a project to its current name (`handle("BE BE", user)`) succeeds with a "renamed" message, which is misleading. | Add an early return: `if old_name == new_name: return "기존 이름과 동일합니다."` |
+| NB-3 | Robustness | The TOCTOU gap between `find_project` and `rename_project` is mitigated by the UNIQUE constraint at the DB level, but an `IntegrityError` from a concurrent duplicate rename would surface as an unhandled 500-level error. | Wrap `rename_project` in a `try/except sqlite3.IntegrityError` and return `_DUPLICATE` message. Low urgency for a single-user SQLite app. |
+| NB-4 | Test organization | `test_rename_other_user_project` is in `TestProjectRenameErrors` but actually tests a success scenario (User B renaming their own project). | Move it to `TestProjectRenameHappyPath` or create a `TestProjectRenameIsolation` class. |
+| NB-5 | Test coverage | No test for extra arguments (3+ tokens) behavior. No test for renaming to the same name. No test verifying that archives remain linked after rename (foreign key on `project_id` ensures this, but an explicit test would document the guarantee). | Add tests for these edge cases. |
+
+### Positive Observations
+
+- Parameterized queries throughout -- no SQL injection risk.
+- `rename_project` filters by `user_id`, enforcing data isolation at the DB layer.
+- Cross-user isolation is explicitly tested (`test_rename_cross_user_isolation`).
+- Handler is concise at 38 lines and mirrors the patterns of existing handlers.
+
+---
+
+## Security Findings
+
+| ID | Severity | Category | Finding | Status |
+|----|----------|----------|---------|--------|
+| S-1 | **Pass** | SQL Injection | All queries use parameterized `?` placeholders. No string interpolation in SQL. | Pass |
+| S-2 | **Pass** | Authorization | `rename_project` and `find_project` both filter by `user_id`, preventing cross-user access. Tested in `test_rename_cross_user_isolation`. | Pass |
+| S-3 | **Pass** | Input validation | User input (`old_name`, `new_name`) is only used as SQL bind parameters, never interpolated into queries or shell commands. | Pass |
+| S-4 | **Low** | TOCTOU | Check-then-act pattern between `find_project` and `rename_project` has a race window. Mitigated by UNIQUE constraint on `(user_id, name)`. In the unlikely race scenario, `sqlite3.IntegrityError` would propagate unhandled. | Acceptable for SQLite single-process usage; see NB-3 for hardening suggestion. |
+| S-5 | **Pass** | Sensitive data | No hardcoded secrets, API keys, or credentials. | Pass |
+| S-6 | **Pass** | Dependencies | No new dependencies added. | Pass |
+
+---
+
+## Follow-up Issues Proposed
+
+1. **Handle `IntegrityError` in rename handler** -- Catch `sqlite3.IntegrityError` from concurrent UNIQUE constraint violations and return a user-friendly duplicate-name message instead of an unhandled exception.
+2. **Add edge-case tests for rename** -- Cover extra arguments, same-name rename, and archive linkage after rename.
+3. **Validate exact argument count** -- Decide whether to reject or ignore extra tokens beyond the expected two arguments, and apply consistently across all command handlers.
+
+---
+
+## Verdict
+
+**Approve.** One blocking bug fixed (whitespace in success message). All 8 tests pass after fix. The implementation is correct, secure, and follows existing patterns. SQL injection is prevented via parameterized queries. Cross-user data isolation is enforced and tested. Five non-blocking suggestions documented for edge cases and test improvements. Three follow-up issues proposed.
