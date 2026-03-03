@@ -1015,3 +1015,116 @@ No Critical or High severity issues found. All SQL queries use parameterized bin
 ## Verdict
 
 **Approve.** No blocking issues. All 115 tests pass (12 new + 103 existing). All acceptance criteria are met. SQL queries use parameterized binding correctly. `COLLATE NOCASE` provides case-insensitive search as specified. Connection management follows the established `try/finally` pattern. Data isolation between users is enforced and tested. One Low severity security finding (LIKE wildcard characters not escaped) is documented with a follow-up issue. The code closely mirrors `cmd_list.py` in structure, which is both a strength (consistency) and a weakness (duplication) -- a shared formatting helper is proposed as a follow-up. Three follow-up issues proposed.
+
+---
+---
+
+# Review Notes -- ISSUE-010 Remove Command Handler PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue/ISSUE-010-cmd-remove`
+**Files changed:** 3 (cmd_remove.py: 37 lines, db.py: +10 lines, test_cmd_remove.py: 88 lines)
+
+---
+
+## Code Review
+
+### Spec Compliance
+
+**Acceptance Criteria verification:**
+- `/archive remove <ID>` deletes the archive and returns success with ID and title -- covered by `test_remove_success` (line 27) and `test_remove_response_includes_title` (line 49).
+- Row is actually deleted from the database -- covered by `test_remove_deletes_from_db` (line 36).
+- Attempting to delete another user's archive returns not-found (FR-019 data isolation) -- covered by `test_remove_other_user_message` (line 61).
+- Nonexistent ID returns not-found -- covered by `test_remove_nonexistent_id` (line 69).
+- Non-numeric ID returns usage error -- covered by `test_remove_non_numeric_id` (line 77).
+- Empty/whitespace args returns usage -- covered by `test_remove_empty_args` (line 81) and `test_remove_whitespace_only` (line 85).
+
+All acceptance criteria are met.
+
+**Pattern consistency with cmd_edit.py:** The handler follows the same structure as `cmd_edit.py` -- parse args, validate ID, open connection with `try/finally`, check ownership via `get_archive_title`, perform mutation, return formatted response. The TOCTOU pattern is correctly handled: `delete_archive` returns a boolean, and its return value is checked (line 30-31). This is actually more robust than `cmd_edit.py`, which does NOT check the return value of `update_archive_title`.
+
+**SQL pattern:** `DELETE FROM archives WHERE id = ? AND user_id = ?` uses parameterized queries and includes the `user_id` filter for authorization. Correct.
+
+### Blocking Issues
+
+None. All 132 tests pass (8 new + 124 existing).
+
+### Suggestions (non-blocking)
+
+1. **TOCTOU window between `get_archive_title` and `delete_archive` is mitigated but not eliminated**
+
+   The handler calls `get_archive_title` (line 26) to fetch the title for the success response, then calls `delete_archive` (line 30) which also checks ownership. If the row is deleted by another concurrent request between these two calls, `delete_archive` returns `False` and the not-found message is returned. This is correct and safe.
+
+   However, note that the `get_archive_title` call is redundant from a correctness standpoint -- it exists solely to retrieve the title for the success message. An alternative would be to have `delete_archive` return the deleted row's title (using `RETURNING` clause in SQLite 3.35+ or a SELECT-then-DELETE in a single transaction). This would eliminate one DB round-trip and close the TOCTOU window entirely. Non-blocking since the current approach handles the race correctly.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-010-cmd-remove/src/openclaw_archiver/cmd_remove.py` (lines 26-31)
+
+2. **Missing test: args with leading/trailing spaces around ID like `"  1  "`**
+
+   The handler calls `args.strip()` at line 14 and then `int(stripped)` at line 20. `int("  1  ")` would raise a `ValueError` because `stripped` has already been stripped. Wait -- actually `"  1  ".strip()` produces `"1"`, then `int("1")` succeeds. So this case works correctly. However, `"1 2"` would pass `int("1 2")` which raises `ValueError` and returns the `_BAD_ID` message. This is reasonable behavior (reject malformed input), but no test documents it. A test for `handle("1 2", user)` would clarify that extra tokens after the ID are treated as invalid.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-010-cmd-remove/tests/test_cmd_remove.py`
+
+3. **Missing test: negative ID**
+
+   `handle("-1", user_id)` would parse as `int(-1)` successfully, then query the database for `id = -1` which would not exist, returning the not-found message. This is correct behavior, but a test documenting it would strengthen coverage.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-010-cmd-remove/tests/test_cmd_remove.py`
+
+4. **Missing test: zero ID**
+
+   Similar to negative ID. `handle("0", user_id)` would query for `id = 0`. SQLite autoincrement starts at 1, so this would return not-found. Correct behavior, but untested.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-010-cmd-remove/tests/test_cmd_remove.py`
+
+5. **`_USAGE` string is duplicated between `cmd_remove.py` and `test_cmd_remove.py`**
+
+   Same pattern noted in ISSUE-006 and ISSUE-008 reviews. The usage string `"사용법: /archive remove <ID>"` is defined in both files. Consider importing from the module to prevent drift.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-010-cmd-remove/src/openclaw_archiver/cmd_remove.py` (line 7)
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-010-cmd-remove/tests/test_cmd_remove.py` (line 12)
+
+6. **`test_remove_response_includes_title` is fully redundant with `test_remove_success`**
+
+   `test_remove_success` (line 27) asserts both `"삭제했습니다. (ID: 1)"` and `"스프린트 회의록 (3월)"` in the result. `test_remove_response_includes_title` (line 49) asserts only the title string. The latter is a strict subset of the former's assertions. Not harmful, but it adds no additional coverage.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-010-cmd-remove/tests/test_cmd_remove.py` (lines 49-55)
+
+7. **`tmp_path` type hint uses `object` instead of `pathlib.Path`**
+
+   Consistent with all previous test files. Non-blocking.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-010-cmd-remove/tests/test_cmd_remove.py` (multiple methods)
+
+### Follow-up Issues
+
+- **ISSUE-FOLLOW-021:** Consider having `delete_archive` return the deleted title (via `RETURNING` or SELECT-before-DELETE) to eliminate the TOCTOU window and extra DB call.
+- **ISSUE-FOLLOW-022:** Add edge-case tests for remove command: `"1 2"` (extra tokens), `"-1"` (negative ID), `"0"` (zero ID).
+- **ISSUE-FOLLOW-023:** Note that `cmd_edit.py` does NOT check the return value of `update_archive_title` -- unlike this PR which correctly checks `delete_archive`'s return. The edit handler should be updated to check the mutation result for TOCTOU consistency.
+
+---
+
+## Security Findings
+
+### Summary
+
+No Critical or High severity issues found. The handler correctly enforces ownership via `user_id` filtering in both the title lookup and the delete query. The same error message is returned for both "not found" and "not owned" cases, preventing enumeration of other users' archive IDs (FR-019).
+
+### Detailed Assessment
+
+| # | Severity | Category | Finding | Status |
+|---|----------|----------|---------|--------|
+| S-1 | **Pass** | SQL Injection | `delete_archive` uses `DELETE FROM archives WHERE id = ? AND user_id = ?` with parameterized `?` placeholders. `get_archive_title` uses `SELECT title FROM archives WHERE id = ? AND user_id = ?`. No string formatting or concatenation. Both verified in `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-010-cmd-remove/src/openclaw_archiver/db.py` lines 136-168. | Pass |
+| S-2 | **Pass** | Authorization | Data isolation is correctly enforced. Both `get_archive_title` and `delete_archive` filter by `user_id = ?`. A user cannot delete another user's archive. Test `test_remove_other_user_message` (line 61) verifies this. The error message for unauthorized access is identical to the not-found message (`해당 메세지를 찾을 수 없습니다.`), preventing ID enumeration attacks. | Pass |
+| S-3 | **Pass** | Connection management | `try/finally` pattern ensures connection is always closed, even if `delete_archive` raises an exception. Connection is opened only after input validation succeeds. No connection leak possible. | Pass |
+| S-4 | **Pass** | Information disclosure | Error messages reveal only the ID the user typed. No internal paths, SQL errors, stack traces, or information about whether the ID exists but belongs to another user. | Pass |
+| S-5 | **Pass** | Input validation | Non-numeric IDs are rejected before any DB call is made. Empty and whitespace-only inputs return usage message. `int()` parsing prevents injection of non-integer values into the SQL parameter. | Pass |
+| S-6 | **Pass** | Sensitive data | No hardcoded secrets, API keys, credentials, or file paths in any of the three files reviewed. | Pass |
+| S-7 | **Pass** | Dependencies | No new runtime or dev dependencies added. | Pass |
+
+---
+
+## Verdict
+
+**Approve.** No blocking issues. All 132 tests pass (8 new + 124 existing). All acceptance criteria are met. The handler correctly follows the established `cmd_edit.py` pattern with one improvement: it checks the return value of the mutation function (`delete_archive`) for TOCTOU safety. SQL uses parameterized queries. Authorization is enforced via `user_id` filtering with uniform error messages to prevent enumeration. Connection management is correct with `try/finally`. Seven non-blocking suggestions documented, primarily around missing edge-case tests and minor redundancy. Three follow-up issues proposed.
