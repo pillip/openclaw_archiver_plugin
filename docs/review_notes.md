@@ -825,3 +825,193 @@ No Critical or High severity issues found. All SQL queries use parameterized bin
 ## Verdict
 
 **Approve.** No blocking issues. All 103 tests pass (11 new + 92 existing). All acceptance criteria are met. SQL queries are correct (LEFT JOIN for nullable project, parameterized binding, DESC ordering). Connection management follows the established `try/finally` pattern. Data isolation between users is enforced and tested. The `" " + args` workaround is functionally correct and well-commented, with a follow-up issue proposed for a cleaner solution. Six non-blocking suggestions are documented, with three follow-up issues proposed.
+
+---
+---
+
+# Review Notes -- ISSUE-008 Search Command Handler PR
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue/ISSUE-008-cmd-search`
+**Files changed:** 3 (cmd_search.py: 89 lines, db.py: +26 lines, test_cmd_search.py: 131 lines)
+
+---
+
+## Code Review
+
+### Spec Compliance
+
+**Acceptance Criteria verification:**
+- Keyword search with `COLLATE NOCASE` -- covered by `test_search_finds_matching` (line 34) and `test_search_case_insensitive` (line 52).
+- Project-scoped search -- covered by `test_search_in_project` (line 84).
+- Result header with keyword and count -- covered by `test_search_finds_matching` asserts `'검색 결과: "회의록" (2건)'` (line 40), and `test_search_in_project` asserts `'검색 결과: "회의록" — Backend (1건)'` (line 90).
+- Missing keyword returns usage -- covered by `test_missing_keyword` (line 123), `test_whitespace_only` (line 127), `test_only_project_option` (line 129).
+- No results returns appropriate empty message -- covered by `test_search_no_results` (line 63) and `test_search_in_project_no_results` (line 94).
+- Nonexistent project returns error -- covered by `test_search_nonexistent_project` (line 102).
+- Data isolation -- covered by `test_search_excludes_other_user` (line 44).
+
+All acceptance criteria are met.
+
+**UX Spec response format:** Verified against the spec provided in the PR context.
+- All-search header: `검색 결과: "{keyword}" ({count}건)` -- matches spec.
+- Project-search header: `검색 결과: "{keyword}" — {project_name} ({count}건)` -- matches spec.
+- Separator: 8-space indent + full-width dashes -- matches spec.
+- All-search items: `프로젝트: {name} | {date}` or `미분류 | {date}` -- matches spec.
+- Project-search items: `{date}` only (no project label) -- matches spec and verified by `test_search_project_excludes_project_label` (line 110).
+- Empty/error states: all four messages match spec exactly.
+
+**SQL query patterns:** Verified against spec.
+- `search_archives`: `LEFT JOIN`, `WHERE a.user_id = ? AND a.title LIKE ? COLLATE NOCASE`, `ORDER BY a.created_at DESC` -- matches spec.
+- `search_archives_by_project`: `WHERE a.user_id = ? AND a.project_id = ? AND a.title LIKE ? COLLATE NOCASE ORDER BY a.created_at DESC` -- matches spec.
+
+### Blocking Issues
+
+None. All 115 tests pass (12 new + 103 existing).
+
+### Findings
+
+1. **SQL parameterization is correctly applied to LIKE parameters**
+
+   Both `search_archives` and `search_archives_by_project` construct the LIKE pattern as `f"%{keyword}%"` and pass it as a parameterized value via `?` placeholder. The `%` wildcards are embedded in the Python string that is bound as a parameter, not interpolated into the SQL. This is the correct and safe approach -- the parameterized binding ensures that any SQL metacharacters in `keyword` (such as quotes or semicolons) are treated as literal values, not SQL syntax.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (lines 118, 132)
+
+2. **Connection management follows established pattern**
+
+   `cmd_search.handle()` uses `try/finally` to ensure `conn.close()` is always called, consistent with `cmd_save` and `cmd_list`. The connection is opened after input validation (empty keyword check), so the error path does not create a connection. This is efficient and correct.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_search.py` (lines 29-35)
+
+3. **LEFT JOIN is correct for all-search query**
+
+   The `search_archives` query uses `LEFT JOIN projects p ON a.project_id = p.id` to include archives with `project_id = NULL`. This is consistent with `list_archives` in the same file and correctly supports the `미분류` display path. The project-scoped query does not need the JOIN since the project is already known.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (lines 112-119, 126-133)
+
+4. **`created_at` slicing is defensive and consistent**
+
+   The expression `created_at[:10] if created_at else ""` matches the pattern used in `cmd_list.py`. Consistent across the codebase.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_search.py` (lines 47, 79)
+
+### Suggestions (non-blocking)
+
+5. **LIKE wildcard characters (`%`, `_`) in user input are not escaped (Low concern)**
+
+   The LIKE pattern `f"%{keyword}%"` does not escape `%` or `_` characters that may appear in the keyword itself. If a user searches for the literal string `"100%_done"`, the `%` and `_` in the keyword would act as LIKE wildcards: `%` matches any sequence of characters, `_` matches any single character. This means the search would be broader than the user intended.
+
+   For example, searching for `%` would match every archive title (since the pattern becomes `%%%` which is equivalent to `%`). Searching for `_` would match titles containing any single character at that position.
+
+   **Impact assessment:** This is **Low** severity. It does not leak data across users (the `user_id = ?` filter is still enforced). It only affects the precision of the search results for the user who typed the wildcard. In practice, users are unlikely to search for `%` or `_` in a Slack archive tool. SQLite supports the `ESCAPE` clause for this purpose:
+
+   ```python
+   keyword_escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+   # ... LIKE ? ESCAPE '\\' ...
+   (user_id, f"%{keyword_escaped}%")
+   ```
+
+   **Recommendation:** Note for follow-up. Not blocking because it does not create a security vulnerability -- it only affects search precision for edge-case inputs.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (lines 118, 132)
+
+6. **The `" " + args` workaround is repeated from `cmd_list.py`**
+
+   Line 23 uses `extract_project_option(" " + args if args else args)`, identical to `cmd_list.py` line 22. This is the same pattern noted in ISSUE-007 review (suggestion #5). The regex `\s+/p\s+(\S+)\s*$` requires whitespace before `/p`, so a space must be prepended when `/p` may be at the start of `args`.
+
+   This is now duplicated in two command handlers. The follow-up issue ISSUE-FOLLOW-015 (proposed in ISSUE-007 review) to fix the regex with `(?:^|\s+)` would resolve both occurrences. No additional action needed here.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_search.py` (line 23)
+
+7. **Significant code duplication between `cmd_search.py` and `cmd_list.py`**
+
+   The structural patterns are nearly identical between the two modules:
+   - `handle()`: extract project option, open connection, branch on project_name, try/finally close.
+   - `_search_all` / `_list_all`: query, check empty, build header+separator, loop with identical formatting, strip trailing blank, join.
+   - `_search_by_project` / `_list_by_project`: find project, check None, get project_id, query, check empty, build header+separator, loop, strip, join.
+   - Per-item formatting: `#{aid}  {title}`, `{link}`, `{proj_label} | {date}` or `{date}`.
+
+   The only differences are:
+   - The DB functions called (list vs search).
+   - The header text (`저장된 메세지` vs `검색 결과`).
+   - The empty-state messages.
+   - `_search_all`/`_search_by_project` receive an additional `keyword` parameter.
+
+   This is not blocking for 89 lines of code, but as more commands follow this pattern, the duplication will become a maintenance burden. A shared formatting helper (as proposed in ISSUE-FOLLOW-017 from the ISSUE-007 review) would reduce this.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_search.py` (entire file)
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_list.py` (entire file)
+
+8. **Missing test: LIKE wildcard injection behavior**
+
+   No test verifies what happens when the keyword contains `%` or `_`. Adding a test that searches for `"%"` and documents the (broad-match) behavior would make the design decision explicit and prevent confusion in the future.
+
+   **Recommended test:**
+   ```python
+   def test_search_percent_in_keyword(self, tmp_path, monkeypatch):
+       db_path = _seed_db(tmp_path)
+       monkeypatch.setenv("OPENCLAW_ARCHIVER_DB_PATH", db_path)
+       # '%' in keyword acts as LIKE wildcard, matching all titles.
+       result = handle("%", _USER_A)
+       assert "(3건)" in result  # matches all 3 archives for USER_A
+   ```
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_search.py`
+
+9. **Missing test: ordering verification**
+
+   Same gap as noted in ISSUE-007 review. The SQL specifies `ORDER BY a.created_at DESC` but no test verifies the order of results. Since all seeded rows are inserted within the same second, `created_at` values are identical and SQLite's tiebreaker ordering is not guaranteed by spec (though in practice it follows rowid order).
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_search.py`
+
+10. **`_USAGE` string is duplicated between `cmd_search.py` and `test_cmd_search.py`**
+
+    The usage string `"사용법: /archive search <키워드> [/p <프로젝트>]"` is defined in both files. Same pattern as noted in ISSUE-006 review (suggestion #9). Consider importing from the module or using a looser assertion.
+
+    **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/cmd_search.py` (line 13)
+    **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_search.py` (line 12)
+
+11. **Performance: `LIKE '%...%'` cannot use index prefix scans**
+
+    As noted in the PR context, the `LIKE '%keyword%'` pattern with a leading wildcard prevents SQLite from using the `idx_archives_title` index for prefix optimization. This means a full table scan (filtered by `user_id` via `idx_archives_user`) is required for every search query. This is acceptable for the expected data volume (personal Slack archive, likely hundreds to low thousands of rows per user), but should be documented as a known limitation if the tool is ever used at larger scale.
+
+    **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` (lines 116, 130)
+
+12. **`tmp_path` type hint uses `object` instead of `pathlib.Path`**
+
+    Consistent with all previous test files. Non-blocking.
+
+    **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/tests/test_cmd_search.py` (multiple methods)
+
+### Follow-up Issues
+
+- **ISSUE-FOLLOW-018:** Escape LIKE wildcard characters (`%`, `_`) in search keyword using SQLite's `ESCAPE` clause, or document the current broad-match behavior as intentional.
+- **ISSUE-FOLLOW-019:** Extract shared formatting logic from `cmd_list.py` and `cmd_search.py` into a common helper module (extends ISSUE-FOLLOW-017).
+- **ISSUE-FOLLOW-020:** Add ordering verification tests for search results using explicit `created_at` values (extends ISSUE-FOLLOW-016).
+
+---
+
+## Security Findings
+
+### Summary
+
+No Critical or High severity issues found. All SQL queries use parameterized binding. One Medium-Low finding regarding LIKE wildcard characters in user input, which affects search precision but does not create a data leak or injection vulnerability.
+
+### Detailed Assessment
+
+| # | Severity | Category | Finding | Status |
+|---|----------|----------|---------|--------|
+| S-1 | **Pass** | SQL Injection | Both `search_archives` and `search_archives_by_project` use `?` parameterized placeholders for all user-supplied values (`user_id`, `project_id`, keyword-based LIKE pattern). The LIKE pattern is constructed as `f"%{keyword}%"` in Python and bound as a parameter -- the `%` wildcards are part of the bound value, not interpolated into SQL text. No string formatting or concatenation in SQL construction. Verified in `/Users/pillip/project/practice/openclaw_archiver_plugin/src/openclaw_archiver/db.py` lines 108-133. | Pass |
+| S-2 | **Low** | Input validation | **LIKE wildcard characters not escaped.** User-supplied `%` and `_` characters in the keyword are passed through to the LIKE pattern, causing them to act as SQL wildcards. A search for `%` matches all titles; `_` matches any single character. This does NOT leak data across users (the `user_id = ?` filter is always enforced), so it only affects the searching user's result precision. The fix is to escape these characters using `ESCAPE '\'` clause. Classified as Low because there is no cross-user data exposure, no injection, and the impact is limited to slightly broader search results. | Open |
+| S-3 | **Pass** | Authorization | Data isolation is correctly enforced. Both search queries filter by `a.user_id = ?`. The project-scoped query additionally filters by `a.project_id = ?`, and the project itself is resolved via `find_project(conn, user_id, project_name)` which filters by `user_id`. Test `test_search_excludes_other_user` (line 44) verifies that User A cannot see User B's archives. | Pass |
+| S-4 | **Pass** | Connection management | `try/finally` pattern ensures connection is always closed. Connection is only opened after input validation. No connection leak possible. | Pass |
+| S-5 | **Pass** | Information disclosure | Error messages reveal only the keyword and project name the user typed. No internal paths, SQL errors, or stack traces are exposed. User-supplied values are echoed back in plain text, which is safe in Slack's rendering context. | Pass |
+| S-6 | **Pass** | XSS | All output is plain text returned to Slack. No HTML generation. User-supplied `keyword`, `title`, `link`, and `project_name` values are included via f-strings in plain text context. Slack handles rendering safely. | Pass |
+| S-7 | **Pass** | Sensitive data | No hardcoded secrets, API keys, credentials, or file paths in any of the three files reviewed. | Pass |
+| S-8 | **Pass** | Dependencies | No new runtime or dev dependencies added. | Pass |
+
+---
+
+## Verdict
+
+**Approve.** No blocking issues. All 115 tests pass (12 new + 103 existing). All acceptance criteria are met. SQL queries use parameterized binding correctly. `COLLATE NOCASE` provides case-insensitive search as specified. Connection management follows the established `try/finally` pattern. Data isolation between users is enforced and tested. One Low severity security finding (LIKE wildcard characters not escaped) is documented with a follow-up issue. The code closely mirrors `cmd_list.py` in structure, which is both a strength (consistency) and a weakness (duplication) -- a shared formatting helper is proposed as a follow-up. Three follow-up issues proposed.
