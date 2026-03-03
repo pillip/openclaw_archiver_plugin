@@ -1361,3 +1361,94 @@ return f"프로젝트 이름을 변경했습니다.\n{old_name} → {new_name}"
 ## Verdict
 
 **Approve.** One blocking bug fixed (whitespace in success message). All 8 tests pass after fix. The implementation is correct, secure, and follows existing patterns. SQL injection is prevented via parameterized queries. Cross-user data isolation is enforced and tested. Five non-blocking suggestions documented for edge cases and test improvements. Three follow-up issues proposed.
+
+---
+
+# Review Notes -- ISSUE-013 `project delete` Command Handler
+
+**Reviewer:** Senior Code Review Agent
+**Date:** 2026-03-03
+**Branch:** `issue-ISSUE-013-cmd-project-delete`
+**Files changed:** 3 (`cmd_project_delete.py`, `db.py`, `tests/test_cmd_project_delete.py`)
+
+---
+
+## Code Review
+
+### Blocking Issues
+
+None. All 10 tests pass. The implementation is correct and follows existing project patterns.
+
+### Suggestions (non-blocking)
+
+1. **Sentinel value `-1` for "not found" is inconsistent with codebase conventions**
+
+   `delete_project()` returns `-1` to signal "project not found", while all other DB functions in the same module use `None` (e.g., `find_project`) or `bool` (e.g., `delete_archive`, `rename_project`) for similar semantics. This creates a risk of subtle bugs -- a caller checking `if not result` would treat 0 (valid: project deleted, zero archives unlinked) as falsy.
+
+   **Suggestion:** Return `int | None` where `None` means "not found" and `int >= 0` means the count of unlinked archives. This aligns with `find_project` returning `None` for missing rows.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-013-cmd-project-delete/src/openclaw_archiver/db.py` (line 217)
+
+2. **Test `test_delete_other_user_project` has dead code and unclear intent**
+
+   The test calls `handle("Backend", _USER_A)` on line 122, assigns the result to `result`, but never asserts on it. This first call actually deletes User A's own "Backend" project as a side effect, which is not what the test name implies. The real cross-user isolation test starts at line 126 where it creates a project only User B has and verifies User A cannot delete it.
+
+   **Suggestion:** Remove lines 122-125 (the first `handle` call and its comment). The test should only create a project for User B and verify User A gets "not found". The existing `test_other_user_archives_unaffected` already covers the scenario where both users have the same project name.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-013-cmd-project-delete/tests/test_cmd_project_delete.py` (lines 117-132)
+
+3. **Hardcoded 8-space indentation in multi-line response**
+
+   Line 27 of `cmd_project_delete.py` uses `\n        {unlinked}` (8 spaces). If this is for Slack block formatting, it should be documented. If unintentional, the leading spaces will appear in the user-facing message and look odd.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-013-cmd-project-delete/src/openclaw_archiver/cmd_project_delete.py` (line 27)
+
+4. **Transaction safety is correct but implicit**
+
+   The `delete_project` function relies on Python's `sqlite3` module implicitly opening a transaction before the first DML statement, with `conn.commit()` at the end. If an exception occurs between the UPDATE and DELETE, the `conn.close()` in the `handle` function's `finally` block will implicitly roll back the uncommitted transaction. This works correctly, but a comment noting this design choice would help maintainers.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-013-cmd-project-delete/src/openclaw_archiver/db.py` (lines 221-233)
+
+5. **No FK ON DELETE action defined in schema**
+
+   The `archives.project_id` foreign key has no `ON DELETE` action (defaults to `NO ACTION`). This means deleting a project row without first NULLing the FK would raise an `IntegrityError` when `PRAGMA foreign_keys=ON`. The current code correctly handles this by doing the UPDATE before the DELETE. However, adding `ON DELETE SET NULL` to the schema would provide a safety net and simplify the code. This would be a schema migration, so it is a follow-up item.
+
+---
+
+## Security Findings
+
+### No Critical or High severity issues found.
+
+### Medium
+
+None.
+
+### Low
+
+1. **[Low] No confirmation step for destructive operation**
+
+   The `project delete` command permanently deletes a project and unlinks all its archives with no confirmation prompt or undo capability. While this is consistent with the existing `archive delete` pattern in the codebase, destructive operations ideally have a confirmation mechanism. This is a UX concern more than a security concern, and the risk is mitigated by the fact that archives are preserved (only unlinked, not deleted).
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-013-cmd-project-delete/src/openclaw_archiver/cmd_project_delete.py`
+
+2. **[Low] Format string in `_NOT_FOUND` uses `.format()` on user-controlled input**
+
+   `_NOT_FOUND.format(name=name)` interpolates the project name (user input) into the response string. Since this is a plain string `.format()` call with a named placeholder `{name}`, and the output goes to a chat response (not HTML/SQL), there is no injection risk. However, if the user provides a name containing `{` or `}` characters, Python's `.format()` will raise a `KeyError` or `ValueError`, causing an unhandled exception.
+
+   **Suggestion:** Use an f-string directly or catch formatting errors, or simply validate that the name does not contain brace characters.
+
+   **File:** `/Users/pillip/project/practice/openclaw_archiver_plugin/.worktrees/issue-ISSUE-013-cmd-project-delete/src/openclaw_archiver/cmd_project_delete.py` (line 8, 23)
+
+---
+
+## Follow-up Issues
+
+1. **Refactor `delete_project` return type** -- Change from `-1` sentinel to `int | None` for consistency with the rest of the DB layer.
+2. **Add `ON DELETE SET NULL` to `archives.project_id` FK** -- Schema migration to add a safety net for project deletion; would allow simplifying `delete_project` to skip the explicit UPDATE.
+3. **Sanitize brace characters in user-supplied project names** -- Either reject names with `{`/`}` at input validation or switch `_NOT_FOUND` from `.format()` to f-string to prevent `KeyError` on malformed names.
+
+---
+
+## Verdict
+
+**Approve.** All 10 tests pass. The implementation is correct, secure, and follows existing codebase patterns. Transaction safety is properly handled. SQL injection is prevented via parameterized queries. Cross-user data isolation is enforced on all three queries (SELECT, UPDATE, DELETE) and verified by tests. Two low-severity findings documented -- a potential `KeyError` from `.format()` on brace-containing names and the absence of a confirmation step. Three follow-up issues proposed for the sentinel return value, FK schema improvement, and input sanitization.
