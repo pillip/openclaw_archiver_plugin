@@ -154,3 +154,15 @@ def update_archive_title(
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+def delete_archive(
+    conn: sqlite3.Connection, archive_id: int, user_id: str
+) -> bool:
+    """Delete an archive owned by user_id. Returns True if a row was deleted."""
+    cur = conn.execute(
+        "DELETE FROM archives WHERE id = ? AND user_id = ?",
+        (archive_id, user_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
