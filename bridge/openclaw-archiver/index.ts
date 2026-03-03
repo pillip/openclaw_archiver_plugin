@@ -15,7 +15,7 @@ interface PluginResponse {
   response: string | null;
 }
 
-function resolveServerUrl(config?: { serverUrl?: string }): {
+export function resolveServerUrl(config?: { serverUrl?: string }): {
   url: string;
   source: "config" | "env" | "default";
 } {
