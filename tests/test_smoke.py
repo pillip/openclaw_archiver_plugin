@@ -15,9 +15,9 @@ class TestScaffolding:
         result = handle_message(message="", user_id="U00000000")
         assert result is None
 
-    def test_handle_message_returns_none_for_arbitrary_input(self) -> None:
+    def test_handle_message_routes_archive_command(self) -> None:
         result = handle_message(message="/archive save test link", user_id="U12345678")
-        assert result is None
+        assert result is not None
 
     def test_run_is_callable(self) -> None:
         assert callable(run)
