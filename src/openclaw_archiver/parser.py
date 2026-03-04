@@ -32,8 +32,12 @@ def extract_url(text: str) -> tuple[str, str | None]:
     """
     m = _URL_RE.search(text)
     if m:
-        remaining = (text[: m.start()] + text[m.end() :]).strip()
-        return remaining, m.group(0)
+        url = m.group(0).rstrip(">")
+        start = m.start()
+        if start > 0 and text[start - 1] == "<":
+            start -= 1
+        remaining = (text[:start] + text[m.end() :]).strip()
+        return remaining, url
     return text.strip(), None
 
 

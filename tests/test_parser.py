@@ -94,6 +94,29 @@ class TestExtractUrl:
         )
         assert url == "https://first.com"
 
+    def test_slack_angle_bracket_url(self) -> None:
+        """Slack wraps URLs in <...> — strip angle brackets."""
+        remaining, url = extract_url(
+            "제목 <https://slack.com/archives/C01/p123>"
+        )
+        assert remaining == "제목"
+        assert url == "https://slack.com/archives/C01/p123"
+
+    def test_slack_angle_bracket_url_with_trailing_text(self) -> None:
+        remaining, url = extract_url(
+            "before <https://example.com/path> after"
+        )
+        assert remaining == "before  after"
+        assert url == "https://example.com/path"
+
+    def test_url_with_only_trailing_angle_bracket(self) -> None:
+        """URL ending with > but no leading < — still strip >."""
+        remaining, url = extract_url(
+            "제목 https://slack.com/archives/C01/p123>"
+        )
+        assert remaining == "제목"
+        assert url == "https://slack.com/archives/C01/p123"
+
     def test_url_with_query_params(self) -> None:
         remaining, url = extract_url(
             "title https://slack.com/path?foo=bar&baz=1"
