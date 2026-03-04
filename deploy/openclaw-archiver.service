@@ -7,7 +7,10 @@ Type=simple
 # IMPORTANT: Set User= and Group= to a non-root service account before deploying.
 # Without these, the service runs as root and %h resolves to /root.
 # Example: User=openclaw  Group=openclaw
-ExecStart=/usr/local/bin/openclaw-archiver-server
+User=ubuntu
+Group=ubuntu
+ExecStart=
+ExecStart=/home/ubuntu/openclaw_archiver_plugin/.venv/bin/openclaw-archiver-server
 Restart=on-failure
 RestartSec=5
 RestartPreventExitStatus=78
@@ -15,11 +18,11 @@ RestartPreventExitStatus=78
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=%h/.openclaw
+ProtectHome=no
+ReadWritePaths=/home/ubuntu/.openclaw
 
 # Environment (override port if needed)
-# Environment=OPENCLAW_ARCHIVER_PORT=8201
+Environment=OPENCLAW_ARCHIVER_PORT=8201
 
 [Install]
 WantedBy=multi-user.target
