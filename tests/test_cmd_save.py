@@ -43,7 +43,7 @@ class TestSaveHappyPath:
 
         assert "저장했습니다." in result
         assert "회의록" in result
-        assert "프로젝트: Backend" in result
+        assert "*프로젝트:* Backend" in result
 
     def test_save_creates_project_automatically(self, tmp_path: object, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         db_path = _make_db(tmp_path)

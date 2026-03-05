@@ -27,8 +27,8 @@ class TestHelp:
     def test_contains_header_and_separator(self) -> None:
         result = handle("", "U_TEST")
 
-        assert "/archive 사용법" in result
-        assert "─────────────────────────────" in result
+        assert "*/archive 사용법*" in result
+        assert "───" in result
 
     def test_contains_project_management_section(self) -> None:
         result = handle("", "U_TEST")

@@ -39,7 +39,7 @@ class TestListAll:
 
         result = handle("", _USER_A)
 
-        assert "저장된 메세지 (3건)" in result
+        assert "*저장된 메세지* (3건)" in result
         assert "스프린트 회의록" in result
         assert "코드 리뷰 가이드" in result
         assert "미분류 메모" in result
@@ -58,7 +58,7 @@ class TestListAll:
 
         result = handle("", _USER_A)
 
-        assert "프로젝트: Backend" in result
+        assert "Backend" in result
 
     def test_list_all_shows_unclassified(self, tmp_path: object, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         db_path = _seed_db(tmp_path)
@@ -76,8 +76,8 @@ class TestListAll:
 
         # Check format elements.
         assert "#" in result  # ID prefix
-        assert "https://slack.com/" in result  # Link
-        assert "─────" in result  # Separator
+        assert "<https://slack.com/" in result  # Slack link format
+        assert "───" in result  # Separator
 
     def test_list_all_empty(self, tmp_path: object, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         db_path = os.path.join(str(tmp_path), "empty.sqlite3")
@@ -99,7 +99,7 @@ class TestListByProject:
 
         result = handle("/p Backend", _USER_A)
 
-        assert "저장된 메세지 — Backend (2건)" in result
+        assert "*저장된 메세지 — Backend* (2건)" in result
         assert "스프린트 회의록" in result
         assert "코드 리뷰 가이드" in result
         assert "미분류 메모" not in result
