@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SEPARATOR = "─────────────────────────────"
+SEPARATOR = "───"
 
 
 def format_date(created_at: str | None) -> str:
@@ -27,25 +27,21 @@ def format_archive_rows(
         List of formatted lines (no trailing blank line).
     """
     lines: list[str] = []
-    for row in rows:
+    for i, row in enumerate(rows):
         if include_project:
             aid, title, link, project_name, created_at = row
             date = format_date(created_at)
-            proj_label = f"프로젝트: {project_name}" if project_name else "미분류"
-            lines.append(f"        #{aid}  {title}")
-            lines.append(f"            {link}")
-            lines.append(f"            {proj_label} | {date}")
+            proj_label = project_name if project_name else "미분류"
+            lines.append(f"#{aid} {title}")
+            lines.append(f"<{link}|링크> | {proj_label} | {date}")
         else:
             aid, title, link, created_at = row
             date = format_date(created_at)
-            lines.append(f"        #{aid}  {title}")
-            lines.append(f"            {link}")
-            lines.append(f"            {date}")
-        lines.append("")
-
-    # Remove trailing empty line.
-    if lines and lines[-1] == "":
-        lines.pop()
+            lines.append(f"#{aid} {title}")
+            lines.append(f"<{link}|링크> | {date}")
+        # Add blank line between items (not after last).
+        if i < len(rows) - 1:
+            lines.append("")
 
     return lines
 
