@@ -43,7 +43,7 @@ def _search_all(conn, user_id: str, keyword: str) -> str:  # type: ignore[no-unt
         return _NO_RESULT.format(keyword=keyword)
 
     count = len(rows)
-    header = [f'검색 결과: "{keyword}" ({count}건)', f"        {SEPARATOR}"]
+    header = [f'*검색 결과: "{keyword}"* ({count}건)', SEPARATOR]
     items = format_archive_rows(rows, include_project=True)
     return "\n".join(header + items)
 
@@ -61,8 +61,8 @@ def _search_by_project(
 
     count = len(rows)
     header = [
-        f'검색 결과: "{keyword}" — {project_name} ({count}건)',
-        f"        {SEPARATOR}",
+        f'*검색 결과: "{keyword}" — {project_name}* ({count}건)',
+        SEPARATOR,
     ]
     items = format_archive_rows(rows, include_project=False)
     return "\n".join(header + items)
