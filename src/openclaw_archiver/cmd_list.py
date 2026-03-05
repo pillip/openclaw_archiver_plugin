@@ -38,7 +38,7 @@ def _list_all(conn, user_id: str) -> str:  # type: ignore[no-untyped-def]
         return _EMPTY_ALL
 
     count = len(rows)
-    header = [f"저장된 메세지 ({count}건)", f"        {SEPARATOR}"]
+    header = [f"*저장된 메세지* ({count}건)", SEPARATOR]
     items = format_archive_rows(rows, include_project=True)
     return "\n".join(header + items)
 
@@ -54,8 +54,8 @@ def _list_by_project(conn, user_id: str, project_name: str) -> str:  # type: ign
 
     count = len(rows)
     header = [
-        f"저장된 메세지 — {project_name} ({count}건)",
-        f"        {SEPARATOR}",
+        f"*저장된 메세지 — {project_name}* ({count}건)",
+        SEPARATOR,
     ]
     items = format_archive_rows(rows, include_project=False)
     return "\n".join(header + items)
