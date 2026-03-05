@@ -25,10 +25,10 @@ def handle(args: str, user_id: str) -> str:
 
         lines = [
             f"저장했습니다. (ID: {archive_id})",
-            f"        제목: {title}",
+            f"*제목:* {title}",
         ]
         if project:
-            lines.append(f"        프로젝트: {project}")
+            lines.append(f"*프로젝트:* {project}")
 
         return "\n".join(lines)
     finally:
