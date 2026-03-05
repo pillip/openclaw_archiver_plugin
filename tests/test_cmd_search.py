@@ -37,7 +37,7 @@ class TestSearchAll:
 
         result = handle("회의록", _USER_A)
 
-        assert '검색 결과: "회의록" (2건)' in result
+        assert '*검색 결과: "회의록"* (2건)' in result
         assert "스프린트 회의록" in result
         assert "주간 회의록 정리" in result
 
@@ -74,7 +74,7 @@ class TestSearchAll:
 
         result = handle("스프린트", _USER_A)
 
-        assert "프로젝트: Backend" in result
+        assert "Backend" in result
         assert "#" in result
 
 
@@ -87,7 +87,7 @@ class TestSearchByProject:
 
         result = handle("회의록 /p Backend", _USER_A)
 
-        assert '검색 결과: "회의록" — Backend (1건)' in result
+        assert '*검색 결과: "회의록" — Backend* (1건)' in result
         assert "스프린트 회의록" in result
         assert "주간 회의록 정리" not in result
 

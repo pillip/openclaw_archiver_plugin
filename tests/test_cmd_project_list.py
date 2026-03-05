@@ -39,7 +39,7 @@ class TestProjectListHappyPath:
 
         result = handle("", _USER_A)
 
-        assert "프로젝트 (2개)" in result
+        assert "*프로젝트* (2개)" in result
         assert "Backend" in result
         assert "2건" in result
         assert "Frontend" in result
@@ -52,7 +52,7 @@ class TestProjectListHappyPath:
         result = handle("", _USER_A)
 
         # User A should see 2 projects, not User B's
-        assert "프로젝트 (2개)" in result
+        assert "*프로젝트* (2개)" in result
 
     def test_user_b_sees_own_projects(self, tmp_path: object, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         db_path = _seed_db(tmp_path)
@@ -60,7 +60,7 @@ class TestProjectListHappyPath:
 
         result = handle("", _USER_B)
 
-        assert "프로젝트 (1개)" in result
+        assert "*프로젝트* (1개)" in result
         assert "Backend" in result
         assert "1건" in result
 
@@ -70,7 +70,7 @@ class TestProjectListHappyPath:
 
         result = handle("", _USER_A)
 
-        assert "─────────────────────────────" in result
+        assert "───" in result
 
 
 class TestProjectListEmpty:

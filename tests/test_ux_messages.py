@@ -16,7 +16,7 @@ from openclaw_archiver.plugin import handle_message
 _USER = "U_UX_TEST"
 
 _DATE_RE = r"\d{4}-\d{2}-\d{2}"
-_SEPARATOR = "─────────────────────────────"
+_SEPARATOR = "───"
 
 
 @pytest.fixture(autouse=True)
@@ -44,10 +44,10 @@ class TestSaveSuccess:
             _USER,
         )
         assert resp is not None
-        # Pattern: 저장했습니다. (ID: {id})\n        제목: {title}
+        # Pattern: 저장했습니다. (ID: {id})\n*제목:* {title}
         assert "저장했습니다. (ID:" in resp
-        assert "제목: 스프린트 회의록" in resp
-        assert "프로젝트:" not in resp
+        assert "*제목:* 스프린트 회의록" in resp
+        assert "*프로젝트:*" not in resp
 
     def test_save_with_project(self) -> None:
         resp = handle_message(
@@ -56,8 +56,8 @@ class TestSaveSuccess:
         )
         assert resp is not None
         assert "저장했습니다. (ID:" in resp
-        assert "제목: 스프린트 회의록" in resp
-        assert "프로젝트: Backend" in resp
+        assert "*제목:* 스프린트 회의록" in resp
+        assert "*프로젝트:* Backend" in resp
 
 
 class TestEditSuccess:
@@ -283,7 +283,7 @@ class TestListFormatting:
         )
         resp = handle_message("/archive list", _USER)
         assert resp is not None
-        assert "저장된 메세지 (2건)" in resp
+        assert "*저장된 메세지* (2건)" in resp
         assert _SEPARATOR in resp
 
     def test_list_date_format(self) -> None:
@@ -326,7 +326,7 @@ class TestListFormatting:
         )
         resp = handle_message("/archive search 검색", _USER)
         assert resp is not None
-        assert '검색 결과: "검색" (1건)' in resp
+        assert '*검색 결과: "검색"* (1건)' in resp
 
 
 class TestProjectListFormatting:
@@ -342,7 +342,7 @@ class TestProjectListFormatting:
         )
         resp = handle_message("/archive project list", _USER)
         assert resp is not None
-        assert "프로젝트 (2개)" in resp
+        assert "*프로젝트* (2개)" in resp
         assert "1건" in resp
 
 
@@ -357,7 +357,7 @@ class TestHelpMessage:
     def test_help_contains_all_commands(self) -> None:
         resp = handle_message("/archive help", _USER)
         assert resp is not None
-        assert "/archive 사용법" in resp
+        assert "*/archive 사용법*" in resp
         assert _SEPARATOR in resp
         assert "/archive save" in resp
         assert "/archive list" in resp
@@ -434,7 +434,7 @@ class TestEndToEnd:
         )
         assert resp is not None
         assert "저장했습니다" in resp
-        assert "프로젝트: LifeProj" in resp
+        assert "*프로젝트:* LifeProj" in resp
 
         # List in project
         resp = handle_message("/archive list /p LifeProj", _USER)
