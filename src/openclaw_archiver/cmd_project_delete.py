@@ -24,7 +24,7 @@ def handle(args: str, user_id: str) -> str:
 
         result = f'"{name}" 프로젝트를 삭제했습니다.'
         if unlinked > 0:
-            result += f"\n        {unlinked}건의 메세지가 미분류로 변경되었습니다."
+            result += f"\n{unlinked}건의 메세지가 미분류로 변경되었습니다."
 
         return result
     finally:
