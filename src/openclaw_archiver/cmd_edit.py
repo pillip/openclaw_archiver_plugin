@@ -35,7 +35,7 @@ def handle(args: str, user_id: str) -> str:
 
         return (
             f"제목을 수정했습니다. (ID: {archive_id})\n"
-            f"        {old_title} → {new_title}"
+            f"*변경:* {old_title} → {new_title}"
         )
     finally:
         conn.close()

@@ -30,6 +30,6 @@ def handle(args: str, user_id: str) -> str:
         if not deleted:
             return _NOT_FOUND.format(id=archive_id)
 
-        return f"삭제했습니다. (ID: {archive_id})\n        {title}"
+        return f"삭제했습니다. (ID: {archive_id})\n*제목:* {title}"
     finally:
         conn.close()
