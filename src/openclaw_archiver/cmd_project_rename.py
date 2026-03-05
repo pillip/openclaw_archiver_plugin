@@ -35,6 +35,6 @@ def handle(args: str, user_id: str) -> str:
             # Should not happen after require_project, but defensive
             return f'"{old_name}" 프로젝트를 찾을 수 없습니다.'
 
-        return f"프로젝트 이름을 변경했습니다.\n        {old_name} → {new_name}"
+        return f"프로젝트 이름을 변경했습니다.\n*변경:* {old_name} → {new_name}"
     finally:
         conn.close()

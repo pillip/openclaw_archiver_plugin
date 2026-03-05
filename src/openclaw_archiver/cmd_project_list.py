@@ -21,9 +21,9 @@ def handle(args: str, user_id: str) -> str:
         if not projects:
             return _EMPTY
 
-        lines = [f"프로젝트 ({len(projects)}개)", f"        {SEPARATOR}"]
+        lines = [f"*프로젝트* ({len(projects)}개)", SEPARATOR]
         for name, count in projects:
-            lines.append(f"        {name}     {count}건")
+            lines.append(f"{name} — {count}건")
 
         return "\n".join(lines)
     finally:
